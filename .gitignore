@@ -1,0 +1,14 @@
+creds.env
+.env
+api_tokens*
+*cookie*
+chrome-profile/
+aqd_data/
+venv/
+*.log
+*_log.md
+alt.out
+queue*.json
+parity_tries.json
+menu_ocr_cache/
+STOP*

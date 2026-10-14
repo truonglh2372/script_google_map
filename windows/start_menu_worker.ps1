@@ -1,0 +1,1 @@
+Set-Location C:\aqd; if(-not (Get-CimInstance Win32_Process | ?{$_.CommandLine -like '*menu_worker.py*'})){Start-Process -WindowStyle Hidden -FilePath 'C:\Users\Admin\AppData\Local\Programs\Python\Python312\python.exe' -ArgumentList 'menu_worker.py' -WorkingDirectory C:\aqd}

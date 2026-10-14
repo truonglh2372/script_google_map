@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+<key>Label</key><string>aqd.menu</string>
+<key>ProgramArguments</key><array><string>/Users/hoangtruongle/aqd/venv/bin/python</string><string>/Users/hoangtruongle/aqd/menu_worker.py</string></array>
+<key>WorkingDirectory</key><string>/Users/hoangtruongle/aqd</string>
+<key>EnvironmentVariables</key><dict><key>AQD_ROOT</key><string>/Users/hoangtruongle/aqd</string><key>AQD_MENU_FLOOR</key><string>0</string><key>AQD_MENU_CEIL</key><string>999999999</string><key>PYTHONIOENCODING</key><string>utf-8</string><key>AQD_CLIP_DEVICE</key><string>mps</string></dict>
+<key>RunAtLoad</key><true/>
+<key>KeepAlive</key><dict><key>PathState</key><dict><key>/Users/hoangtruongle/aqd/STOP_MENU</key><false/><key>/Users/hoangtruongle/aqd/STOP_ALL</key><false/></dict></dict>
+<key>ThrottleInterval</key><integer>60</integer>
+<key>StandardOutPath</key><string>/Users/hoangtruongle/aqd/menu_worker.out</string><key>StandardErrorPath</key><string>/Users/hoangtruongle/aqd/menu_worker.err</string>
+</dict></plist>
