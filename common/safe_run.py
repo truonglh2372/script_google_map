@@ -3,6 +3,9 @@
   prep : list unnamed drafts (sequential reads, 3s gap) + browser-free Maps fetch -> aqd_data/<id>/info.json (NO server writes)
   push : strictly sequential writes; 1 in-flight request; >=3s gap; photo URLs in chunks of <=PHOTO_CHUNK;
          any request >20s / 5xx / 429 / timeout -> wait 5 min, retry the place once; second failure -> stop.
+  list : one page window of the unnamed drafts (--start-page/--max-pages/--per-page/--unnamed/--id-suffix, with a
+         probe + fallback to the old 24/page listing) + a <queue>.meta.json sidecar the caller uses to continue.
+  run  : list order, one place at a time; --limit caps how many places this pass handles.
 Run: bash -c 'set -a; . C:/aqd/.aqd_session/creds.env; set +a; python3 C:/aqd/safe_run.py prep|push [--limit N]'"""
 import argparse, json, os, random, re, sys, time
 ROOT = os.environ.get("AQD_ROOT", "C:/aqd").replace("\\", "/")
@@ -21,6 +24,7 @@ LOG = ROOT + "/safe_run_log.md"
 PROG = ROOT + "/aqd_progress.md"
 QUEUE = ROOT + "/queue.json"
 GAP, SLOW, HTTP_TO, PHOTO_CHUNK, COOLDOWN = 3.0, 20.0, 45, 5, 300
+LIST_PAGE_MAX, LIST_META = 500, ".meta.json"
 STOPFILE = ROOT + "/STOP"
 
 
@@ -363,23 +367,95 @@ def nap(sec):
     return True
 
 
+def _suffix_param(raw):
+    return ",".join(d for d in re.split(r"[,\s]+", raw or "") if d)
+
+
+def eta_line(total, per_page, max_pages, gap=GAP):
+    """The one line printed right before the listing starts, so nobody thinks it hung."""
+    pages = max(1, -(-int(total or 0) // max(1, int(per_page or 24))))
+    head = f"listing {pages} pages (~{pages * gap / 60.0:.0f} min at {gap:.0f}s/page)"
+    if max_pages and pages > max_pages:
+        return (head + f" - listing only the first {max_pages}/{pages} pages now"
+                       f" (~{max_pages * gap / 60.0:.0f} min), fetching starts right after")
+    return head + " - fetching starts right after"
+
+
+def list_query(args, per_page, pg, mode):
+    if mode == "paged":
+        q = f"?status=draft&page={pg}&per_page={per_page}&summary=1"
+        if args.unnamed:
+            q += "&unnamed=1"
+        if args.id_suffix:
+            q += "&id_suffix=" + _suffix_param(args.id_suffix)
+        return q
+    return f"?status=draft&page={pg}"
+
+
+def list_page(G, args, per_page, pg, mode):
+    return G.req("GET", API + list_query(args, per_page, pg, mode))
+
+
+def open_listing(G, args, requested, start):
+    """Probe the new paging params on the first page of the window; never fail when this server has none."""
+    try:
+        body = list_page(G, args, requested, start, "paged")
+    except APIError as e:
+        log(f"LIST new paging params refused ({e}); using the old 24/page listing")
+        return "legacy", list_page(G, args, requested, start, "legacy")
+    if int(body.get("per_page") or 0) == requested:
+        return "paged", body
+    log("LIST server ignores per_page/has_more; using the old 24/page listing")
+    return "legacy", body
+
+
 def cmd_list(args):
-    G = Guard(); rows = []; pg = 1
+    G = Guard()
+    requested = max(1, min(50, args.per_page or 24))
+    first = max(1, int(args.start_page or 1))
+    window = max(0, int(args.max_pages or 0))
+    mode, body = open_listing(G, args, requested, first)
+    per_page = requested if mode == "paged" else 24
+    last = first + window - 1 if window else LIST_PAGE_MAX
+    log(f"LIST mode={mode} per_page={per_page} start_page={first} max_pages={window or 'all'}"
+        + (f" id_suffix={_suffix_param(args.id_suffix)}" if args.id_suffix else ""))
+    rows, pg, seen_min, scanned, capped, total = [], first - 1, None, 0, False, None
     while True:
-        b = G.req("GET", f"{API}?status=draft&page={pg}")
-        if pg == 1 or pg % 20 == 0: log(f"LIST page {pg}/{b.get('total_count', 0) // 24 + 1} (total {b.get('total_count')}) ...")
-        if not b["restaurants"]: break
-        rows += [r for r in b["restaurants"] if not (r.get("name") or "").strip() and args.floor < r["id"] <= args.ceil]
-        if min(r["id"] for r in b["restaurants"]) <= args.floor or pg >= 500: break
         pg += 1
+        batch = (body or {}).get("restaurants") or []
+        if not batch:
+            break
+        scanned += 1
+        ids = [r["id"] for r in batch]
+        seen_min = min(ids) if seen_min is None else min(seen_min, min(ids))
+        if total is None:
+            total = body.get("total_count")
+        rows += [r for r in batch if not (r.get("name") or "").strip() and args.floor < r["id"] <= args.ceil]
+        if pg == first:
+            log(eta_line(total, per_page, window, GAP))
+        if pg == first or pg % 20 == 0:
+            log(f"LIST page {pg}/{max(1, (int(total or 0) // per_page) + 1)} (total {total}) ...")
+        if min(ids) <= args.floor or pg >= LIST_PAGE_MAX:
+            break
+        if mode == "paged" and body.get("has_more") is False:
+            break
+        if window and pg >= last:
+            capped = True
+            break
+        body = list_page(G, args, per_page, pg + 1, mode)
     rows = sorted({r["id"]: r for r in rows}.values(), key=lambda r: -r["id"])
     json.dump(rows, open(args.queue, "w", encoding="utf-8"), ensure_ascii=False)
-    log(f"LIST {len(rows)} unnamed drafts > {args.floor}: {rows[0]['id'] if rows else None}..{rows[-1]['id'] if rows else None}; pages={pg} avg={G.tt/max(1,G.n):.2f}s max={G.max:.1f}s")
+    meta = {"mode": mode, "per_page": per_page, "start_page": first, "max_pages": window, "pages": scanned,
+            "min_id": seen_min, "capped": capped, "total_count": total}
+    json.dump(meta, open(args.queue + LIST_META, "w", encoding="utf-8"), ensure_ascii=False)
+    log(f"LIST {len(rows)} unnamed drafts > {args.floor}: {rows[0]['id'] if rows else None}..{rows[-1]['id'] if rows else None}; "
+        f"pages={scanned} capped={capped} avg={G.tt/max(1,G.n):.2f}s max={G.max:.1f}s")
+    return meta
 
 
 def cmd_run(args):
     rows = json.load(open(args.queue, encoding="utf-8")); GR = Guard()
-    last_maps = 0.0; streak = 0; level = 0
+    last_maps = 0.0; streak = 0; level = 0; done = 0; limit = max(0, int(args.limit or 0))
     for r in rows:
         if r["id"] <= args.floor: log(f"reached floor {args.floor}; stop"); break
         if os.path.exists(STOPFILE): log("STOP file; end run"); break
@@ -439,6 +515,11 @@ def cmd_run(args):
             if os.environ.get("AQD_ALT"):
                 open(ROOT + "/fetch_backoff.txt", "w", encoding="utf-8").write(str(time.time() + m * 60)); sys.exit(3)
             if not nap(m * 60): log("STOP file; end run"); break
+        if fetched:
+            done += 1
+            if limit and done >= limit:
+                log(f"run limit {limit} reached ({done} places this pass); re-list to continue")
+                break
 
 
 def cmd_backfill(args):
@@ -498,5 +579,8 @@ if __name__ == "__main__":
     ap = argparse.ArgumentParser(); ap.add_argument("cmd"); ap.add_argument("--limit", type=int, default=0)
     ap.add_argument("--pages", type=int, default=12); ap.add_argument("--ids", type=int, nargs="*")
     ap.add_argument("--floor", type=int, default=2813); ap.add_argument("--ceil", type=int, default=10**9); ap.add_argument("--queue", default=QUEUE); ap.add_argument("--sleep", type=float, default=20); ap.add_argument("--force", action="store_true"); ap.add_argument("--ignore-peak", action="store_true")
+    ap.add_argument("--start-page", type=int, default=1); ap.add_argument("--max-pages", type=int, default=0)
+    ap.add_argument("--per-page", type=int, default=0); ap.add_argument("--unnamed", action="store_true")
+    ap.add_argument("--id-suffix", default="")
     a = ap.parse_args()
     {"prep": cmd_prep, "push": cmd_push, "run": cmd_run, "list": cmd_list, "backfill": cmd_backfill}[a.cmd](a)

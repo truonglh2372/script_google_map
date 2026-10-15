@@ -20,6 +20,15 @@
     & ([scriptblock]::Create((irm https://raw.githubusercontent.com/truonglh2372/script_google_map/main/windows/install.ps1))) -Root C:\aqd_test -Clean -NoStart -Yes
 
   Switches: -Root <dir>  -Clean  -NoStart (install only, do not launch alt.py)  -NoChrome  -SkipHeavy  -Yes (accept defaults)
+
+  Two things that used to look like a freeze:
+    * the heavy pip groups now stream their output, print a "still running" line every 15s and report the
+      elapsed time, and pip itself gets --timeout 60 --retries 5. Pick CLIP and/or OCR separately, or -SkipHeavy.
+      On Python 3.13+ the installer checks for a torch wheel first and skips the groups when there is none
+      (a source build can take hours). Python 3.12 is preferred.
+    * the fetcher lists only AQD_LIST_MAX_PAGES pages (default 20, under a minute) before the first place is
+      fetched, prints the ETA of the listing, and continues with the next pages on the following rounds.
+      AQD_FETCH_LIMIT (default 0 = all) caps how many places each round fetches.
 #>
 [CmdletBinding()]
 param(
@@ -38,7 +47,6 @@ $RawBase = 'https://raw.githubusercontent.com/truonglh2372/script_google_map/mai
 $RepoGit = 'https://github.com/truonglh2372/script_google_map.git'
 $RepoZip = 'https://codeload.github.com/truonglh2372/script_google_map/zip/refs/heads/main'
 $RequiredPkgs = @('requests', 'pillow', 'playwright', 'openlocationcode')
-$HeavyPkgs = @('open_clip_torch', 'torch', 'easyocr')
 
 function Say([string]$m) { Write-Host $m }
 function Head([string]$m) { Write-Host ""; Write-Host "==== $m" -ForegroundColor Cyan }
@@ -53,13 +61,69 @@ function WriteNoBom([string]$Path, [string]$Text) {
   [System.IO.File]::WriteAllText($Path, $Text, $enc)
 }
 
-function Nat([string]$Exe, [object[]]$ArgList, [string]$LogPath = '') {
+function Fmt-Secs([int]$s) {
+  if ($s -ge 60) { return ("{0}m {1}s" -f [int]($s / 60), ($s % 60)) }
+  return "${s}s"
+}
+
+function Show-LogTail([string]$Path, [long]$From, [int]$Keep = 4) {
+  if (-not (Test-Path $Path)) { return $From }
+  $fs = $null
+  try { $fs = New-Object System.IO.FileStream($Path, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite) }
+  catch { return $From }
+  try {
+    if ($fs.Length -le $From) { return $From }
+    $fs.Seek($From, [System.IO.SeekOrigin]::Begin) | Out-Null
+    $sr = New-Object System.IO.StreamReader($fs)
+    $txt = $sr.ReadToEnd()
+    $sr.Dispose()
+    $pos = $fs.Position
+    $lines = @($txt -split "[`r`n]+" | Where-Object { $_.Trim() })
+    $n = $lines.Count
+    if ($n -gt $Keep) { Say "  | ... $($n - $Keep) more line(s)"; $lines = $lines[($n - $Keep)..($n - 1)] }
+    foreach ($l in $lines) { Say ("  | " + $l.Trim()) }
+    return $pos
+  } finally { if ($fs) { $fs.Dispose() } }
+}
+
+function Nat([string]$Exe, [object[]]$ArgList, [string]$LogPath = '', [switch]$Stream, [int]$Beat = 15,
+             [int]$KillAfterSec = 0, [string]$Label = '') {
   if (-not $LogPath) { $LogPath = Join-Path $env:TEMP ('aqd-native-' + [guid]::NewGuid().ToString('N').Substring(0, 8) + '.log') }
   $prev = $ErrorActionPreference
   $ErrorActionPreference = 'Continue'
-  try { & $Exe @ArgList *> $LogPath } catch { } finally { $ErrorActionPreference = $prev }
-  $rc = $LASTEXITCODE
-  return [pscustomobject]@{ rc = $rc; log = $LogPath }
+  $t0 = Get-Date
+  try {
+    if (-not $Stream) {
+      & $Exe @ArgList *> $LogPath
+      return [pscustomobject]@{ rc = $LASTEXITCODE; log = $LogPath; secs = [int]((Get-Date) - $t0).TotalSeconds }
+    }
+    $errPath = "$LogPath.err"
+    Remove-Item -Force $LogPath, $errPath -ErrorAction SilentlyContinue
+    if ($Label) { Note "$Label - live log: $LogPath" }
+    $p = Start-Process -FilePath $Exe -ArgumentList $ArgList -NoNewWindow -PassThru -RedirectStandardOutput $LogPath -RedirectStandardError $errPath
+    $outPos = 0; $errPos = 0; $lastBeat = Get-Date; $killed = $false
+    while (-not $p.HasExited) {
+      Start-Sleep -Seconds 2
+      $outPos = Show-LogTail $LogPath $outPos
+      $errPos = Show-LogTail $errPath $errPos
+      $el = [int]((Get-Date) - $t0).TotalSeconds
+      if ($KillAfterSec -gt 0 -and $el -ge $KillAfterSec) {
+        Warn "$Label still running after $(Fmt-Secs $el) (limit $(Fmt-Secs $KillAfterSec)) - stopping it"
+        try { $p.Kill() } catch { }
+        $killed = $true
+        break
+      }
+      if (((Get-Date) - $lastBeat).TotalSeconds -ge $Beat) {
+        $lastBeat = Get-Date
+        Note "$Label still running after $(Fmt-Secs $el) - it is NOT frozen, full log: $LogPath"
+      }
+    }
+    if (-not $killed) { $p.WaitForExit() }
+    $rc = if ($killed) { 124 } else { [int]$p.ExitCode }
+    $outPos = Show-LogTail $LogPath $outPos
+    $errPos = Show-LogTail $errPath $errPos
+    return [pscustomobject]@{ rc = $rc; log = $LogPath; err = $errPath; secs = [int]((Get-Date) - $t0).TotalSeconds; killed = $killed }
+  } finally { $ErrorActionPreference = $prev }
 }
 
 function Ask([string]$Question, [string]$Default = '') {
@@ -93,6 +157,18 @@ function Confirm([string]$Question, [bool]$DefaultYes) {
   return [bool]($a -match '^(?i)y(es)?$')
 }
 
+function Python-Version([string]$Py) {
+  # No quotes inside the -c payload: Windows PowerShell 5.1 strips inner double quotes when it builds the
+  # native command line, which would silently break the probe.
+  $r = Nat $Py @('-c', 'import sys; v=sys.version_info; print(v[0], v[1], v[2])')
+  if ($r.rc -ne 0) { return $null }
+  $t = (((Get-Content $r.log -ErrorAction SilentlyContinue) -join ' ') + ' ').Trim()
+  if ($t -match '(\d+)\s+(\d+)\s+(\d+)') {
+    return [pscustomobject]@{ text = "$($Matches[1]).$($Matches[2]).$($Matches[3])"; major = [int]$Matches[1]; minor = [int]$Matches[2] }
+  }
+  return $null
+}
+
 function Find-Python {
   $cands = @()
   foreach ($n in @('python', 'python3')) {
@@ -100,22 +176,43 @@ function Find-Python {
     if ($c -and $c.Source) { $cands += $c.Source }
   }
   if (Get-Command py -ErrorAction SilentlyContinue) {
-    $r = Nat 'py' @('-3', '-c', 'import sys; print(sys.executable)')
-    if ($r.rc -eq 0) { $cands += @((Get-Content $r.log -ErrorAction SilentlyContinue) | Where-Object { $_ } | Select-Object -First 1) }
+    foreach ($v in @('-3.12', '-3.11', '-3.10', '-3.13', '-3.14', '-3')) {
+      $r = Nat 'py' @($v, '-c', 'import sys; print(sys.executable)')
+      if ($r.rc -eq 0) { $cands += @((Get-Content $r.log -ErrorAction SilentlyContinue) | Where-Object { $_ } | Select-Object -First 1) }
+    }
   }
-  foreach ($v in @('Python312', 'Python311', 'Python313', 'Python310')) {
+  foreach ($v in @('Python312', 'Python311', 'Python310', 'Python313', 'Python314')) {
     $cands += (Join-Path $env:LOCALAPPDATA "Programs\Python\$v\python.exe")
     $cands += "C:\$v\python.exe"
   }
-  foreach ($p in $cands) {
+  $best = $null
+  foreach ($p in ($cands | Select-Object -Unique)) {
     if (-not $p) { continue }
     $p = ([string]$p).Trim()
     if ($p -match '\\WindowsApps\\') { continue }
     if (-not (Test-Path $p)) { continue }
-    $r = Nat $p @('-c', 'import sys; print(sys.version_info[0])')
-    if ($r.rc -eq 0) { return $p }
+    $ver = Python-Version $p
+    if (-not $ver -or $ver.major -ne 3) { continue }
+    if ($ver.minor -lt 10) { Warn "ignoring $p ($($ver.text)): this payload needs Python 3.10 or newer"; continue }
+    $rank = switch ($ver.minor) { 12 { 0 } 11 { 1 } 10 { 2 } 13 { 3 } default { 4 } }
+    Note "python candidate: $($ver.text) at $p"
+    if ($rank -eq 0) { return [pscustomobject]@{ path = $p; ver = $ver } }
+    if (-not $best) { $best = [pscustomobject]@{ path = $p; ver = $ver; rank = $rank } }
+    elseif ($rank -lt $best.rank) { $best = [pscustomobject]@{ path = $p; ver = $ver; rank = $rank } }
   }
-  return $null
+  return $best
+}
+
+function Test-TorchWheel([string]$Py) {
+  Note "checking whether torch has a wheel for this Python (pip index versions torch, max 2 min)"
+  $r = Nat $Py @('-m', 'pip', 'index', 'versions', 'torch', '--disable-pip-version-check', '--timeout', '60', '--retries', '2') -KillAfterSec 120
+  $txt = ''
+  foreach ($p in @($r.log, "$($r.log).err")) {
+    if (Test-Path $p) { $txt += ((Get-Content $p -ErrorAction SilentlyContinue) -join ' ') + ' ' }
+  }
+  if ($txt -match '(?i)no matching distribution found') { return 'no' }
+  if ($r.rc -eq 0 -and ($txt -match '(?i)LATEST:' -or $txt -match '(?i)Available versions')) { return 'yes' }
+  return 'unknown'
 }
 
 function Get-AqdProcs([string]$ForRoot) {
@@ -146,7 +243,8 @@ function Get-Source([string]$Work, [string]$Ref) {
   return $dir.FullName
 }
 
-function Install-Flat([string]$Src, [string]$NewRoot, [string]$Py, [string]$Suffixes, [string]$Parity) {
+function Install-Flat([string]$Src, [string]$NewRoot, [string]$Py, [string]$Suffixes, [string]$Parity,
+                      [string]$ListPages = '20', [string]$FetchLimit = '0') {
   New-Item -ItemType Directory -Force -Path $NewRoot | Out-Null
   $copied = 0
   foreach ($f in Get-ChildItem (Join-Path $Src 'common') -File) {
@@ -158,7 +256,7 @@ function Install-Flat([string]$Src, [string]$NewRoot, [string]$Py, [string]$Suff
     if (Test-Path $from) { Copy-Item -Force $from (Join-Path $NewRoot $f); $copied++ } else { Warn "missing windows\$f" }
   }
   Ok "copied $copied files into $NewRoot (FLAT layout: every .py sits directly in $NewRoot)"
-  $envLine = "`$env:AQD_ROOT='$NewRoot'; `$env:AQD_ID_SUFFIXES='$Suffixes'; `$env:AQD_PARITY='$Parity'`r`n"
+  $envLine = "`$env:AQD_ROOT='$NewRoot'; `$env:AQD_ID_SUFFIXES='$Suffixes'; `$env:AQD_PARITY='$Parity'; `$env:AQD_LIST_MAX_PAGES='$ListPages'; `$env:AQD_FETCH_LIMIT='$FetchLimit'`r`n"
   foreach ($f in @('start_fetcher.ps1', 'start_menu_worker.ps1')) {
     $p = Join-Path $NewRoot $f
     if (-not (Test-Path $p)) { Warn "missing $f"; continue }
@@ -314,6 +412,31 @@ function Ask-Suffixes([string]$NewRoot) {
   }
 }
 
+function Ask-ListOptions {
+  Say ""
+  Note "First start lists unnamed drafts from the server (1 request every 3s) BEFORE the first place is fetched."
+  Note "AQD_LIST_MAX_PAGES = pages listed per round: 20 pages = under a minute, then fetching starts."
+  Note "Press Enter for 20. Type 0 for the old behaviour (list the whole list first, about 12 minutes)."
+  while ($true) {
+    $raw = ([string](Ask 'AQD_LIST_MAX_PAGES' '20')).Trim()
+    if ($raw -eq '' -or $raw -match '^0+$') { return '0' }
+    if ($raw -match '^\d+$') { return $raw }
+    Warn "AQD_LIST_MAX_PAGES must be a whole number of pages (0 = list everything first)"
+  }
+}
+
+function Ask-FetchLimit {
+  Say ""
+  Note "AQD_FETCH_LIMIT = how many places this machine fetches per round (Enter = 0 = no limit)."
+  Note "A weak or test machine can use e.g. 10 to do a few places, then list again."
+  while ($true) {
+    $raw = ([string](Ask 'AQD_FETCH_LIMIT' '0')).Trim()
+    if ($raw -eq '') { return '0' }
+    if ($raw -match '^\d+$') { return $raw }
+    Warn "AQD_FETCH_LIMIT must be a whole number of places (0 = no limit)"
+  }
+}
+
 function Invoke-Install {
   $clean = $Clean.IsPresent
   if (-not $clean -and $env:AQD_CLEAN) { $clean = [bool]($env:AQD_CLEAN -notmatch '^(?i)(0|false|no|off)$') }
@@ -334,11 +457,15 @@ function Invoke-Install {
     Note "payload: $RepoGit"
 
     Head "1/8 Python"
-    $py = Find-Python
-    if (-not $py) { Die "no real Python found. Install it then re-run: winget install -e --id Python.Python.3.12 (and turn off the python.exe App execution alias)" }
-    $ver = Nat $py @('-c', 'import sys; print(sys.version.split()[0])')
-    $verTxt = if (Test-Path $ver.log) { ((Get-Content $ver.log -ErrorAction SilentlyContinue) -join ' ').Trim() } else { '?' }
-    Ok "python: $py ($verTxt)"
+    $pyInfo = Find-Python
+    if (-not $pyInfo) { Die "no real Python 3.10+ found. Install it then re-run: winget install -e --id Python.Python.3.12 (and turn off the python.exe App execution alias)" }
+    $py = $pyInfo.path
+    $pyVer = $pyInfo.ver.text
+    Ok "python: $py ($pyVer)"
+    if ($pyInfo.ver.minor -ne 12) {
+      Warn "this payload is written for Python 3.12; $pyVer works but torch/opencv/scipy wheels are less certain for it"
+      Warn "if you have an odd heavy-install failure, install 3.12: winget install -e --id Python.Python.3.12"
+    }
 
     $existed = Test-Path $newRoot
     if (-not $existed) { New-Item -ItemType Directory -Force -Path $newRoot | Out-Null; Ok "created $newRoot" }
@@ -375,23 +502,56 @@ function Invoke-Install {
     $src = Get-Source $work $ref
     Ok "source: $src"
     $cfg = Ask-Suffixes $newRoot
-    WriteNoBom (Join-Path $newRoot 'aqd_config.json') (@{ id_suffixes = $cfg.suffixes; parity = $cfg.parity } | ConvertTo-Json)
+    $cfg.listPages = Ask-ListOptions
+    $cfg.fetchLimit = Ask-FetchLimit
+    WriteNoBom (Join-Path $newRoot 'aqd_config.json') (@{ id_suffixes = $cfg.suffixes; parity = $cfg.parity; list_max_pages = $cfg.listPages; fetch_limit = $cfg.fetchLimit } | ConvertTo-Json)
     if ($cfg.suffixes) { Ok "aqd_config.json: AQD_ID_SUFFIXES='$($cfg.suffixes)'" } else { Ok "aqd_config.json: AQD_PARITY='$($cfg.parity)' (no suffixes)" }
-    Install-Flat $src $newRoot $py $cfg.suffixes $cfg.parity
+    Ok "aqd_config.json: AQD_LIST_MAX_PAGES='$($cfg.listPages)' AQD_FETCH_LIMIT='$($cfg.fetchLimit)'"
+    Install-Flat $src $newRoot $py $cfg.suffixes $cfg.parity $cfg.listPages $cfg.fetchLimit
     Write-Creds $newRoot
     if ((Count-CredKeys $newRoot) -lt 2) { Warn "creds.env is missing keys - alt.py will fail when it starts" }
 
     Head "7/8 Install dependencies"
+    $pipArgs = @('-m', 'pip', 'install', '--disable-pip-version-check', '--no-input', '--timeout', '60', '--retries', '5')
+    Note "pip network timeout 60s, 5 retries (a stalled download gives up with a clear error instead of hanging)"
+    Note "output streams live below, and the full log stays in $newRoot\pip-*.log"
     Ok "required: $($RequiredPkgs -join ', ')"
-    $r = Nat $py (@('-m', 'pip', 'install', '--disable-pip-version-check', '--no-input') + $RequiredPkgs)
-    if ($r.rc -eq 0) { Ok "required packages installed" } else { Warn "pip rc=$($r.rc) - see $($r.log)"; Get-Content $r.log -Tail 12 -ErrorAction SilentlyContinue | ForEach-Object { Note $_ } }
+    $r = Nat $py ($pipArgs + $RequiredPkgs) (Join-Path $newRoot 'pip-required.log') -Stream -Label "pip required ($($RequiredPkgs -join ', '))"
+    if ($r.rc -eq 0) { Ok "required packages installed in $(Fmt-Secs $r.secs) (log: $($r.log))" }
+    else { Warn "pip rc=$($r.rc) after $(Fmt-Secs $r.secs) - see $($r.log)"; Get-Content $r.log -Tail 12 -ErrorAction SilentlyContinue | ForEach-Object { Note $_ } }
+
+    $groups = @(
+      @{ name = 'CLIP (torch + open_clip_torch)'; pkgs = @('torch', 'open_clip_torch'); mb = 156
+         what = 'filters the photo gallery: keeps food/drink/menu photos, drops the rest' },
+      @{ name = 'OCR (easyocr)'; pkgs = @('easyocr'); mb = 242
+         what = 'reads menu photos and shop signs (adds about 124 MB once CLIP is in: torch is shared)' }
+    )
     $heavy = -not $SkipHeavy.IsPresent
-    if ($heavy) { $heavy = Confirm "Install the HEAVY set (open_clip_torch + torch + easyocr, ~250MB+)? Better CLIP/OCR image filtering." $true }
+    if (-not $heavy) { Note "heavy groups skipped (-SkipHeavy): CLIP/OCR filtering stays weak, everything else works" }
+    else {
+      $wheel = Test-TorchWheel $py
+      if ($wheel -eq 'yes') { Ok "torch has a wheel for $pyVer - no source build needed" }
+      elseif ($wheel -eq 'no') {
+        Warn "torch has NO wheel for Python ${pyVer}: pip would build it from source, which can take hours"
+        if (-not (Confirm "Install the heavy groups anyway?" $false)) {
+          $heavy = $false
+          Warn "heavy groups skipped - install Python 3.12 (winget install -e --id Python.Python.3.12) and re-run to get them"
+        }
+      } else {
+        Warn "could not tell whether torch has a wheel for Python $pyVer (see the probe log) - continuing"
+      }
+    }
     if ($heavy) {
-      Ok "heavy set: $($HeavyPkgs -join ', ')"
-      $r2 = Nat $py (@('-m', 'pip', 'install', '--disable-pip-version-check', '--no-input') + $HeavyPkgs)
-      if ($r2.rc -eq 0) { Ok "heavy packages installed" } else { Warn "pip rc=$($r2.rc) - still runs, only CLIP/OCR filtering is weaker" }
-    } else { Note "heavy set skipped" }
+      Set-Content -Path (Join-Path $newRoot 'pip-heavy.log') -Value '' -Encoding ascii -ErrorAction SilentlyContinue
+      Note "The heavy groups download a few hundred MB and can take 10-30 minutes on a slow line."
+      Note "Go get a coffee - this window prints progress and a 'still running' line every 15s. Do NOT close it."
+      foreach ($g in $groups) {
+        if (-not (Confirm "Install $($g.name)? ~$($g.mb) MB, 5-20 min. $($g.what)" $true)) { Note "skipped $($g.name)"; continue }
+        $rg = Nat $py ($pipArgs + $g.pkgs) (Join-Path $newRoot 'pip-heavy.log') -Stream -Label "pip $($g.name)"
+        if ($rg.rc -eq 0) { Ok "$($g.name) installed in $(Fmt-Secs $rg.secs)" }
+        else { Warn "$($g.name) pip rc=$($rg.rc) after $(Fmt-Secs $rg.secs) - still runs, only this filtering is weaker (log: $($rg.log))" }
+      }
+    }
 
     Head "8/8 Chrome + start"
     if ($NoChrome.IsPresent) { Warn "Chrome skipped (-NoChrome)" }
@@ -402,6 +562,8 @@ function Invoke-Install {
     $env:AQD_ROOT = $newRoot
     $env:AQD_ID_SUFFIXES = $cfg.suffixes
     $env:AQD_PARITY = $cfg.parity
+    $env:AQD_LIST_MAX_PAGES = $cfg.listPages
+    $env:AQD_FETCH_LIMIT = $cfg.fetchLimit
     if (Confirm "Register auto-start at Windows login (Startup folder)?" ($newRoot -eq $DefaultRoot)) {
       $startup = [Environment]::GetFolderPath('Startup')
       foreach ($f in @('aqd_fetcher.cmd', 'aqd_menu_worker.cmd')) {
@@ -424,9 +586,16 @@ function Invoke-Install {
     Note "root   : $newRoot"
     Note "python : $py"
     Note "id pick: $(if ($cfg.suffixes) { "suffixes $($cfg.suffixes)" } else { "parity=$($cfg.parity)" })"
+    if ($cfg.listPages -eq '0') {
+      Note "first start: lists EVERY page before the first place (about 12 minutes, old behaviour)"
+    } else {
+      Note "first start: lists $($cfg.listPages) pages (under a minute at 3s/page), then the first place is fetched"
+    }
+    Note "per round: $(if ($cfg.fetchLimit -eq '0') { "every listed place" } else { "$($cfg.fetchLimit) place(s), then it lists again" })"
+    Note "watch it : $newRoot\alt.out (and $newRoot\safe_run_log.md for each place)"
     Note "creds  : $(Join-Path $newRoot 'creds.env')"
     Note "config : $(Join-Path $newRoot 'aqd_config.json')"
-    Note "logs   : $newRoot\alt.out , $newRoot\safe_run_log.md"
+    Note "logs   : $newRoot\alt.out , $newRoot\safe_run_log.md , $newRoot\pip-*.log"
     Note "stop   : create file $newRoot\STOP_ALL"
     Say "=====================================" -ForegroundColor Green
   } finally {
