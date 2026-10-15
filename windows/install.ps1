@@ -67,6 +67,12 @@ function Ask([string]$Question, [string]$Default = '') {
 }
 
 function AskSecret([string]$Question) {
+  $redirected = $false
+  try { $redirected = [Console]::IsInputRedirected } catch { $redirected = $false }
+  if ($redirected) {
+    Note "stdin is redirected (not a real console): reading $Question in clear text, no hidden input available"
+    return Read-Host $Question
+  }
   $sec = Read-Host -AsSecureString $Question
   $bstr = [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($sec)
   try { return [System.Runtime.InteropServices.Marshal]::PtrToStringBSTR($bstr) }
