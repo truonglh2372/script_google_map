@@ -225,7 +225,9 @@ function Show-Report([string]$NewRoot) {
   $cp = Join-Path $NewRoot 'chrome-profile'
   if (Test-Path $cp) {
     $bytes = (Get-ChildItem $cp -Recurse -File -Force -ErrorAction SilentlyContinue | Measure-Object Length -Sum).Sum
-    Note ("chrome-profile: {0:N1} MB (Google login session - losing it means logging in again)" -f ($bytes / 1MB))
+    if (-not $bytes) { $bytes = 0 }
+    if ($bytes -ge 1048576) { $sizeTxt = "{0:N1} MB" -f ($bytes / 1MB) } else { $sizeTxt = "{0:N0} KB" -f ($bytes / 1KB) }
+    Note "chrome-profile: $sizeTxt (Google login session - losing it means logging in again)"
   } else { Note "chrome-profile: none" }
   if (Test-Path (Join-Path $NewRoot 'creds.env')) { Note "creds.env: present" } else { Note "creds.env: none" }
   Note "queue*.json: $(@(Get-ChildItem $NewRoot -Filter 'queue*.json' -File -ErrorAction SilentlyContinue).Count) file(s)"
@@ -329,7 +331,7 @@ function Invoke-Install {
     Note "root   : $newRoot"
     Note "mode   : $(if ($clean) { 'CLEAN reinstall' } else { 'fresh install / update' })"
     Note "ref    : $ref"
-    Note "source : $RawBase/windows/install.ps1"
+    Note "payload: $RepoGit"
 
     Head "1/8 Python"
     $py = Find-Python
