@@ -1,12 +1,25 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- TEMPLATE (not a loadable plist): mac/install.sh replaces the __AQD_*__ placeholders per root and writes
+     the result to ~/Library/LaunchAgents/aqd.menu.plist. Keeps the fetch queue untouched. -->
 <plist version="1.0"><dict>
 <key>Label</key><string>aqd.menu</string>
-<key>ProgramArguments</key><array><string>/Users/hoangtruongle/aqd/venv/bin/python</string><string>/Users/hoangtruongle/aqd/menu_worker.py</string></array>
-<key>WorkingDirectory</key><string>/Users/hoangtruongle/aqd</string>
-<key>EnvironmentVariables</key><dict><key>AQD_ROOT</key><string>/Users/hoangtruongle/aqd</string><key>AQD_MENU_FLOOR</key><string>0</string><key>AQD_MENU_CEIL</key><string>999999999</string><key>PYTHONIOENCODING</key><string>utf-8</string><key>AQD_CLIP_DEVICE</key><string>mps</string></dict>
+<key>ProgramArguments</key><array><string>__AQD_PY__</string><string>__AQD_ROOT__/menu_worker.py</string></array>
+<key>WorkingDirectory</key><string>__AQD_ROOT__</string>
+<key>EnvironmentVariables</key><dict>
+<key>AQD_ROOT</key><string>__AQD_ROOT__</string>
+<key>AQD_ID_SUFFIXES</key><string>__AQD_ID_SUFFIXES__</string>
+<key>AQD_PARITY</key><string>__AQD_PARITY__</string>
+<key>AQD_LIST_MAX_PAGES</key><string>__AQD_LIST_MAX_PAGES__</string>
+<key>AQD_FETCH_LIMIT</key><string>__AQD_FETCH_LIMIT__</string>
+<key>AQD_CDP_PORT</key><string>__AQD_CDP_PORT__</string>
+<key>AQD_MENU_FLOOR</key><string>0</string>
+<key>AQD_MENU_CEIL</key><string>999999999</string>
+<key>PYTHONIOENCODING</key><string>utf-8</string>
+<key>AQD_CLIP_DEVICE</key><string>mps</string>
+</dict>
 <key>RunAtLoad</key><true/>
-<key>KeepAlive</key><dict><key>PathState</key><dict><key>/Users/hoangtruongle/aqd/STOP_MENU</key><false/><key>/Users/hoangtruongle/aqd/STOP_ALL</key><false/></dict></dict>
+<key>KeepAlive</key><dict><key>PathState</key><dict><key>__AQD_ROOT__/STOP_MENU</key><false/><key>__AQD_ROOT__/STOP_ALL</key><false/></dict></dict>
 <key>ThrottleInterval</key><integer>60</integer>
-<key>StandardOutPath</key><string>/Users/hoangtruongle/aqd/menu_worker.out</string><key>StandardErrorPath</key><string>/Users/hoangtruongle/aqd/menu_worker.err</string>
+<key>StandardOutPath</key><string>__AQD_ROOT__/menu_worker.out</string><key>StandardErrorPath</key><string>__AQD_ROOT__/menu_worker.err</string>
 </dict></plist>

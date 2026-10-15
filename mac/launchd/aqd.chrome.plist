@@ -1,7 +1,14 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- TEMPLATE (not a loadable plist): mac/install.sh replaces the __AQD_*__ placeholders per root and writes
+     the result to ~/Library/LaunchAgents/aqd.chrome.plist. The CDP port and the profile both follow the root,
+     so a second install never shares this root's Google session. -->
 <plist version="1.0"><dict>
 <key>Label</key><string>aqd.chrome</string>
-<key>ProgramArguments</key><array><string>/Applications/Google Chrome.app/Contents/MacOS/Google Chrome</string><string>--remote-debugging-port=9222</string><string>--user-data-dir=/Users/hoangtruongle/aqd/chrome-profile</string><string>https://www.google.com/maps</string></array>
+<key>ProgramArguments</key><array><string>__AQD_CHROME__</string><string>--no-first-run</string><string>--remote-debugging-address=127.0.0.1</string><string>--remote-debugging-port=__AQD_CDP_PORT__</string><string>--user-data-dir=__AQD_ROOT__/chrome-profile</string><string>--restore-last-session</string></array>
+<key>EnvironmentVariables</key><dict>
+<key>AQD_ROOT</key><string>__AQD_ROOT__</string>
+<key>AQD_CDP_PORT</key><string>__AQD_CDP_PORT__</string>
+</dict>
 <key>RunAtLoad</key><true/><key>KeepAlive</key><true/><key>ThrottleInterval</key><integer>30</integer>
 </dict></plist>

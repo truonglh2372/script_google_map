@@ -1,8 +1,24 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- TEMPLATE (not a loadable plist): mac/install.sh replaces the __AQD_*__ placeholders per root and writes
+     the result to ~/Library/LaunchAgents/aqd.alt.plist, so nothing hardcodes a user name. The
+     EnvironmentVariables block is what makes a login run use the configured id suffixes / parity /
+     list pages / fetch limit / CDP port (the static file had no place to inject them). -->
 <plist version="1.0"><dict>
 <key>Label</key><string>aqd.alt</string>
-<key>ProgramArguments</key><array><string>/bin/sh</string><string>-c</string><string>sleep 45; [ -e /Users/hoangtruongle/aqd/STOP_ALL ] &amp;&amp; exit 0; exec /usr/bin/caffeinate -dimsu /Users/hoangtruongle/aqd/venv/bin/python /Users/hoangtruongle/aqd/alt.py</string></array>
-<key>WorkingDirectory</key><string>/Users/hoangtruongle/aqd</string>
+<key>ProgramArguments</key><array><string>/bin/sh</string><string>-c</string><string>sleep 45; [ -e __AQD_ROOT__/STOP_ALL ] &amp;&amp; exit 0; exec /usr/bin/caffeinate -dimsu __AQD_PY__ __AQD_ROOT__/alt.py</string></array>
+<key>WorkingDirectory</key><string>__AQD_ROOT__</string>
+<key>EnvironmentVariables</key><dict>
+<key>AQD_ROOT</key><string>__AQD_ROOT__</string>
+<key>AQD_ID_SUFFIXES</key><string>__AQD_ID_SUFFIXES__</string>
+<key>AQD_PARITY</key><string>__AQD_PARITY__</string>
+<key>AQD_LIST_MAX_PAGES</key><string>__AQD_LIST_MAX_PAGES__</string>
+<key>AQD_FETCH_LIMIT</key><string>__AQD_FETCH_LIMIT__</string>
+<key>AQD_CDP_PORT</key><string>__AQD_CDP_PORT__</string>
+<key>AQD_CLIP_DEVICE</key><string>mps</string>
+<key>PYTHONIOENCODING</key><string>utf-8</string>
+<key>PYTHONUTF8</key><string>1</string>
+</dict>
 <key>RunAtLoad</key><true/><key>KeepAlive</key><dict><key>SuccessfulExit</key><false/></dict><key>ThrottleInterval</key><integer>60</integer>
+<key>StandardOutPath</key><string>__AQD_ROOT__/alt.launchd.out</string><key>StandardErrorPath</key><string>__AQD_ROOT__/alt.launchd.err</string>
 </dict></plist>

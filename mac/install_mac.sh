@@ -1,4 +1,11 @@
 #!/bin/bash
+# REPLACED - DO NOT USE. This old hand installer is kept for history only.
+# It copied alt.py from /tmp/alt_mac.py (a file that is NOT in the repo and does not exist any more), it
+# patched safe_run.py by hand (pg >= 100 -> pg >= 500), it hardcoded /Users/hoangtruongle/aqd and it forced the
+# old queue6/queue8 generation. It is not re-runnable.
+# The one-command Mac installer is mac/install.sh (see the README):
+#   curl -fsSL https://raw.githubusercontent.com/truonglh2372/script_google_map/main/mac/install.sh | bash
+#   curl -fsSL https://raw.githubusercontent.com/truonglh2372/script_google_map/main/mac/install.sh | AQD_CLEAN=1 bash
 set -e
 R=/Users/hoangtruongle/aqd
 TS=$(date +%Y%m%d_%H%M%S)
