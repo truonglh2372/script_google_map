@@ -253,7 +253,7 @@ def main():
         pass
     if not a.dry and not a.ids:
         global _LOCKF
-        _LOCKF = open(os.path.join(ROOT, "menu_worker.lock"), "a+")
+        _LOCKF = open(os.path.join(ROOT, "menu_worker.lock"), "a+", encoding="utf-8")
         try:
             if os.name == "nt":
                 import msvcrt; _LOCKF.seek(0); msvcrt.locking(_LOCKF.fileno(), msvcrt.LK_NBLCK, 1)

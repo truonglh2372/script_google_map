@@ -209,7 +209,7 @@ def main():
     if not isinstance(p, list):
         print(json.dumps({"error": "no_place", "detail": "preview JSON has no place block"}), file=sys.stderr); return 3
     if a.raw:
-        with open(a.raw, "w") as f:
+        with open(a.raw, "w", encoding="utf-8") as f:
             json.dump(d, f, ensure_ascii=False)
     info = parse(p, a.place_id)
     info["_meta"]["seconds"] = round(time.time() - t0, 2)

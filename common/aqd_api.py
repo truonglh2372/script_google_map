@@ -31,13 +31,14 @@ except ImportError:
     fcntl = None
 from PIL import Image
 
+ROOT = os.environ.get("AQD_ROOT", "C:/aqd").replace("\\", "/")
 BASE = os.environ.get("AQD_BASE", "https://anuongquanhday.com")
-SESSION_DIR = os.environ.get("AQD_SESSION_DIR", "C:/aqd/.aqd_session")
+SESSION_DIR = os.environ.get("AQD_SESSION_DIR", ROOT + "/.aqd_session")
 TOKEN_FILE = os.path.join(SESSION_DIR, "api_tokens.json")
 TOKEN_LOCK = os.path.join(SESSION_DIR, "api_tokens.lock")
 ATTEMPTS_FILE = os.path.join(SESSION_DIR, "api_login_attempts.json")
-LOG_FILE = os.environ.get("AQD_LOG_FILE", "C:/aqd/aqd_api_log.md")
-DATA_DIR = "C:/aqd/aqd_data"
+LOG_FILE = os.environ.get("AQD_LOG_FILE", ROOT + "/aqd_api_log.md")
+DATA_DIR = ROOT + "/aqd_data"
 API = "/v1/admin/restaurants"
 REFRESH_MARGIN_S = 90            # refresh when <90 s of the 15 min access token remain
 MAX_LOGINS_PER_WINDOW = 5        # across all bots (server allows 10 per 3 min per IP)
@@ -115,7 +116,7 @@ def _write_private(path, data):
 
 def _read_json(path, default):
     try:
-        with open(path) as f:
+        with open(path, encoding="utf-8") as f:
             return json.load(f)
     except (FileNotFoundError, ValueError):
         return default
@@ -192,7 +193,7 @@ class TokenStore:
                 self._mem = tok
                 return tok["access_token"]
             _ensure_session_dir()
-            with os.fdopen(os.open(TOKEN_LOCK, os.O_RDWR | os.O_CREAT, 0o600), "w") as lk:
+            with os.fdopen(os.open(TOKEN_LOCK, os.O_RDWR | os.O_CREAT, 0o600), "w", encoding="utf-8") as lk:
                 if fcntl: fcntl.flock(lk, fcntl.LOCK_EX)
                 tok = _read_json(TOKEN_FILE, None)          # another bot may have refreshed meanwhile
                 if self._fresh(tok) and tok.get("access_token") != stale:
@@ -529,7 +530,7 @@ class AQD:
             if r.get("photo_id") and not r.get("skipped"):
                 rec["urls"][_url_hash(r["url"])] = {"url": r["url"], "photo_id": r["photo_id"]}
         rec["updated_at"] = _now()
-        with open(rec_path + ".tmp", "w") as f:
+        with open(rec_path + ".tmp", "w", encoding="utf-8") as f:
             json.dump(rec, f, ensure_ascii=False, indent=1)
         os.replace(rec_path + ".tmp", rec_path)
         for role in ("cover", "logo"):
@@ -586,7 +587,7 @@ class AQD:
     def apply(self, rid, folder=None):
         t0 = time.time()
         folder = folder or os.path.join(DATA_DIR, str(rid))
-        with open(os.path.join(folder, "info.json")) as f:
+        with open(os.path.join(folder, "info.json"), encoding="utf-8") as f:
             info = json.load(f)
         rec_path = os.path.join(folder, "applied.json")
         rec = _read_json(rec_path, {})
@@ -596,7 +597,7 @@ class AQD:
 
         def save_rec():
             rec["updated_at"] = _now()
-            with open(rec_path + ".tmp", "w") as f:
+            with open(rec_path + ".tmp", "w", encoding="utf-8") as f:
                 json.dump(rec, f, ensure_ascii=False, indent=1)
             os.replace(rec_path + ".tmp", rec_path)
 
@@ -752,7 +753,7 @@ class AQD:
                                    "cover_assign", "logo_assign")) for w in warn)
         parts.append(f"{time.time() - t0:.1f}s")
         line = f"- {_now()} #{rid} {'OK' if ok else 'WARN'} " + " ".join(parts) + (" | " + "; ".join(warn) if warn else "")
-        with open(LOG_FILE, "a") as f:
+        with open(LOG_FILE, "a", encoding="utf-8") as f:
             f.write(line + "\n")
         print(line)
         return {"ok": ok, "line": line}
@@ -937,7 +938,7 @@ def main(argv=None):
         elif a.cmd == "dishes":
             out = c.dishes(a.id)
         elif a.cmd == "update-info":
-            src = open(a.json[1:]).read() if a.json.startswith("@") else a.json
+            src = open(a.json[1:], encoding="utf-8").read() if a.json.startswith("@") else a.json
             out = c.update_info(a.id, json.loads(src)); out.pop("restaurant", None)
         elif a.cmd == "validate":
             out = c.validate(a.id)
@@ -972,7 +973,7 @@ def main(argv=None):
                     data = {"id": rid, "photos": c.photos(rid)}
                 except AQDError as e:
                     data = {"id": rid, "error": str(e)}
-                with open(fn + ".tmp", "w") as f:
+                with open(fn + ".tmp", "w", encoding="utf-8") as f:
                     json.dump(data, f, ensure_ascii=False)
                 os.replace(fn + ".tmp", fn)
                 print(rid, flush=True)
@@ -1004,7 +1005,7 @@ def main(argv=None):
                     raise
                 except Exception as e:
                     line = f"- {_now()} #{rid} ERROR {type(e).__name__}: {e}"
-                    with open(LOG_FILE, "a") as f:
+                    with open(LOG_FILE, "a", encoding="utf-8") as f:
                         f.write(line + "\n")
                     print(line); rc = 1
             return rc

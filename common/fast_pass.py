@@ -5,13 +5,14 @@ Options: --dry (no info.json / apply), --limit N.
 Ranges are worked bottom-up, round-robin: #3175.., #2638.., #2101.. (other bots go top-down).
 Log: C:/aqd/fast_pass_log.md"""
 import argparse, json, os, re, sys, time
-sys.path.insert(0, "C:/aqd")
+ROOT = os.environ.get("AQD_ROOT", "C:/aqd").replace("\\", "/")
+sys.path.insert(0, ROOT)
 import maps_fetch as mf
 from aqd_api import AQD, AQDError, DATA_DIR, maps_place_id
 from olcdec import decode as olc_decode
 
-LOG = "C:/aqd/fast_pass_log.md"
-API_LOG = "C:/aqd/aqd_api_log.md"
+LOG = ROOT + "/fast_pass_log.md"
+API_LOG = ROOT + "/aqd_api_log.md"
 INTENTIONAL = {int(x) for x in "1857 1777 1755 1736 1734 1730 1604 1582 1499 1430 1426 1421 1247 802 792 747 734 589 "
                "580 466 464 308 1 2625 2634".split()}
 RANGES = [(3175, 3395), (2638, 2974), (2101, 2576)]
@@ -58,13 +59,13 @@ REST_TYPES = ("barbecue", "seafood", "buffet", "hot_pot", "steak", "fine_dining"
 
 
 def log(line):
-    with open(LOG, "a") as f:
+    with open(LOG, "a", encoding="utf-8") as f:
         f.write(f"- {time.strftime('%Y-%m-%d %H:%M:%S')} {line}\n")
     print(line, flush=True)
 
 
 def append(path, rid, extra=""):
-    with open(path, "a") as f:
+    with open(path, "a", encoding="utf-8") as f:
         f.write(f"{rid}{(' ' + extra) if extra else ''}\n")
 
 
@@ -135,7 +136,7 @@ def pick_roles(photos):
 
 
 def todo_ids(a):
-    logtxt = open(API_LOG).read()
+    logtxt = open(API_LOG, encoding="utf-8").read()
     done = {int(x) for x in re.findall(r"#(\d+) (?:OK|WARN)", logtxt)}
     stay = {int(m) for m in re.findall(r"#(\d+) \w+ .*stay_draft", logtxt)}
     drafts = a.drafts("draft")["restaurants"]
@@ -151,7 +152,7 @@ def todo_ids(a):
 
 
 def busy_elsewhere(rid):
-    return os.path.exists(os.path.join(DATA_DIR, str(rid), "info.json")) or os.path.exists(f"C:/aqd/menus/f/{rid}.json")
+    return os.path.exists(os.path.join(DATA_DIR, str(rid), "info.json")) or os.path.exists(f"{ROOT}/menus/f/{rid}.json")
 
 
 def one(a, rid, row, dry):
@@ -203,14 +204,14 @@ def one(a, rid, row, dry):
     folder = os.path.join(DATA_DIR, str(rid))
     os.makedirs(folder, exist_ok=True)
     tmp = os.path.join(folder, "info.json.fp_tmp")
-    with open(tmp, "w") as f:
+    with open(tmp, "w", encoding="utf-8") as f:
         json.dump(info, f, ensure_ascii=False, indent=1)
     os.replace(tmp, os.path.join(folder, "info.json"))
     res = a.apply(rid)
     if reason:
-        append("C:/aqd/fast_review.txt", rid, f"| {reason} | {info.get('name','')}")
-    append("C:/aqd/review_queue.txt", rid)
-    append("C:/aqd/gallery_queue.txt", rid)
+        append(ROOT + "/fast_review.txt", rid, f"| {reason} | {info.get('name','')}")
+    append(ROOT + "/review_queue.txt", rid)
+    append(ROOT + "/gallery_queue.txt", rid)
     return ("ok" if res["ok"] else "warn"), summary + " | " + res["line"].split(f"#{rid} ", 1)[-1]
 
 
