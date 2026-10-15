@@ -172,7 +172,13 @@ def load_safe_run(base, root):
         sys.modules.pop(name, None)
     if os.path.join(ROOT, "common") not in sys.path:
         sys.path.insert(0, os.path.join(ROOT, "common"))
-    os.environ.update(AQD_ROOT=root, AQD_BASE=base, AQD_SESSION_DIR=os.path.join(root, ".session"),
+    session = os.path.join(root, ".session")
+    os.makedirs(session, exist_ok=True)
+    with open(os.path.join(session, "api_tokens.json"), "w", encoding="utf-8") as f:
+        # pre-seeded: the listing is what is under test, so skip the login request entirely
+        json.dump({"access_token": "mock", "access_token_expires_at": "2030-01-01T00:00:00Z",
+                   "refresh_token": "mock"}, f)
+    os.environ.update(AQD_ROOT=root, AQD_BASE=base, AQD_SESSION_DIR=session,
                       AQD_ADMIN_EMAIL="mock@example.com", AQD_ADMIN_PASSWORD="mock",
                       AQD_LOG_FILE=os.path.join(root, "api.log"))
     import safe_run
