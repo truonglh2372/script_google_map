@@ -14,7 +14,21 @@ Dán **một dòng** vào PowerShell (repo public, không cần token):
 irm https://raw.githubusercontent.com/truonglh2372/script_google_map/main/windows/install.ps1 | iex
 ```
 
-`install.ps1` tự làm hết: tải source từ GitHub (git clone, fallback zip `codeload`) → cài vào `C:\aqd` với **layout PHẲNG** (mọi `common/*.py` nằm **trực tiếp** trong `C:\aqd` vì `safe_run.py` làm `sys.path.insert(0, "C:/aqd")`) → tìm python thật của máy (**ưu tiên 3.12**, cảnh báo nếu máy chỉ có 3.13+) → thay hardcode `C:\Users\Admin\...\python.exe` bằng python đó → cài dependency → **hỏi từng biến môi trường một prompt riêng** (`AQD_ADMIN_EMAIL`, `AQD_ADMIN_PASSWORD` nhập ẩn, `AQD_BASE`) và ghi `C:\aqd\creds.env` → **hỏi đuôi ID**, `AQD_LIST_MAX_PAGES` và `AQD_FETCH_LIMIT` (**Enter là xong**, xem mục dưới) và ghi `C:\aqd\aqd_config.json` → bật Chrome CDP 9222 với profile `C:\aqd\chrome-profile` → khởi động `alt.py`.
+`install.ps1` tự làm hết: tải source từ GitHub (git clone, fallback zip `codeload`) → cài vào `C:\aqd` với **layout PHẲNG** (mọi `common/*.py` nằm **trực tiếp** trong `C:\aqd` vì `safe_run.py` làm `sys.path.insert(0, "C:/aqd")`) → dọn `*.py` lạ ở gốc root không thuộc payload mới (có sao lưu, xem dưới) → tìm python thật của máy (**ưu tiên 3.12**, cảnh báo nếu máy chỉ có 3.13+) → thay hardcode `C:\Users\Admin\...\python.exe` bằng python đó → cài dependency → **hỏi từng biến môi trường một prompt riêng** (`AQD_ADMIN_EMAIL` **bắt buộc**, `AQD_ADMIN_PASSWORD` nhập ẩn — Enter giữ giá trị cũ trong `creds.env` nếu có, `AQD_BASE` mặc định `https://anuongquanhday.com`) và ghi `C:\aqd\creds.env` → **hỏi đuôi ID** (**bắt buộc**, xem mục chia việc), `AQD_LIST_MAX_PAGES` và `AQD_FETCH_LIMIT` (**Enter là xong**) và ghi `C:\aqd\aqd_config.json` → bật Chrome CDP (cổng riêng cho root này, profile `C:\aqd\chrome-profile`) → khởi động `alt.py`.
+
+### Mọi prompt đều có mặc định — Enter là xong
+
+Installer in ngay đầu một dòng tóm tắt để biết Enter sẽ ra gì:
+
+```
+Enter = defaults: base=https://anuongquanhday.com  CLIP=no  OCR=no  id_suffixes=<required>  list_max_pages=20  fetch_limit=0  startup=no
+REQUIRED (no default, asked until valid): AQD_ID_SUFFIXES (digits 0-9), AQD_ADMIN_EMAIL. Everything else is Enter.
+AQD_ADMIN_PASSWORD: Enter keeps the value already in creds.env when there is one.
+```
+
+- **Mọi prompt đều có mặc định**: Enter dùng luôn mặc định, không phải gõ.
+- Chỉ **2 trường bắt buộc** (không thể mặc định được): `AQD_ID_SUFFIXES` (chữ số 0-9; nhập sai/để trống thì hỏi lại) và `AQD_ADMIN_EMAIL`. `AQD_ADMIN_PASSWORD`: Enter giữ mật khẩu cũ trong `creds.env` (nếu đã cài).
+- Khi **stdin bị redirect** (chạy tự động, không có console thật): installer **tự in câu hỏi ra stdout** trước khi đọc, và ghi chú rằng mật khẩu sẽ **hiện chữ** vì không có console thật (trên console thật mật khẩu vẫn ẩn).
 
 Chạy lại nhiều lần không phá gì: `creds.env`, `chrome-profile/` và `aqd_data/` được giữ, chỉ cập nhật source (hỏi trước khi ghi đè `creds.env`). Sau khi Chrome mở, **tự đăng nhập Google** trong cửa sổ đó — script không làm được.
 
@@ -37,13 +51,14 @@ Khi backend đã có `per_page` / `unnamed` / `id_suffix` / `summary` thì `alt.
 
 ### Gói nặng (CLIP / OCR) và tiến độ cài
 
-Nhóm nặng tách làm **2 nhóm**, hỏi riêng, **Enter = cài**:
+Nhóm nặng tách làm **2 nhóm**, hỏi riêng, **mặc định là No** (Enter = **không cài**):
 
 | Nhóm | Gói | Dung lượng tải thật (PyPI, Python 3.12/Windows) | Tác dụng |
 |---|---|---|---|
 | CLIP (torch + open_clip_torch) | `torch`, `open_clip_torch` | **~156 MB** (riêng `torch` 118 MB) | Lọc ảnh: giữ ảnh món/đồ uống/menu, bỏ ảnh không liên quan |
 | OCR (easyocr) | `easyocr` | **~242 MB** (~124 MB thêm nếu đã cài CLIP, vì chung `torch`) | Đọc ảnh menu và bảng hiệu để tạo món/danh mục |
 
+- Installer in **dung lượng ước tính** trước khi hỏi (CLIP **~156 MB**, OCR **~242 MB**, thêm **~124 MB** nếu đã có CLIP vì chung `torch`) và mặc định **No**: bấm **Enter là không tải gì**, gõ `y` mới tải.
 - Trong lúc cài, output của pip **in trực tiếp ra màn hình** (4 dòng mới nhất mỗi 2 giây) và **cứ 15 giây in một dòng** kiểu `pip CLIP (torch + open_clip_torch) still running after 7m 30s - it is NOT frozen, full log: C:\aqd\pip-heavy-torch.log`; xong thì in **thời gian đã mất** và `rc`.
 - Log đầy đủ nằm ở `C:\aqd\pip-required.log` và `C:\aqd\pip-heavy-<nhóm>.log` (ví dụ `pip-heavy-torch.log`, `pip-heavy-easyocr.log` — mỗi nhóm một file để nhóm sau không ghi đè lý do nhóm trước fail).
 - pip chạy với `--timeout 60 --retries 5`: mạng treo thì pip tự bỏ cuộc và báo lỗi rõ thay vì chờ vô hạn.
@@ -66,12 +81,22 @@ Máy đã có `C:\aqd` cũ (tiến trình `alt.py`/`safe_run.py` có thể đang
 $env:AQD_CLEAN=1; irm https://raw.githubusercontent.com/truonglh2372/script_google_map/main/windows/install.ps1 | iex
 ```
 
-1. Tạo `STOP_ALL` + `STOP`, chờ tối đa 60s cho tiến trình tự thoát ở ranh giới quán; sau đó liệt kê tiến trình `python` còn lại và **hỏi trước khi** `Stop-Process -Force`.
+1. Tạo `STOP_ALL` + `STOP` **trong đúng root đang cài**, chờ tối đa 60s cho tiến trình **của root đó** tự thoát ở ranh giới quán; sau đó liệt kê tiến trình `python` **còn lại của root đó** và **hỏi trước khi** `Stop-Process -Force`. Tiến trình `alt.py`/`safe_run.py` thuộc **root khác** chỉ được **cảnh báo, KHÔNG kill** (máy có thể đang chạy bản cài ở root khác).
 2. **Báo cáo trước khi xoá**: số quán trong `aqd_data/`, `SAFE_DONE`, `SAFE_PREP`, số dòng `safe_run_log.md`, có `fetch_backoff.txt` không, dung lượng `chrome-profile/`.
 3. **Sao lưu cứu hộ** `C:\aqd_backup_<timestamp>`: `creds.env`, `chrome-profile/`, `aqd_data/`. **`chrome-profile` chứa phiên đăng nhập Google — mất là phải đăng nhập lại từ đầu.**
 4. Xoá trạng thái gây xung đột: `STOP*`, `queue*.json`, `parity_tries.json`, `fetch_backoff.txt`, `alt.out`, `safe_run_log.md`, `aqd_progress.md`, `aqd_api_log.md`, `start_fetcher.log`, `__pycache__/`, `.aqd_session/` (cache token cũ). **Giữ** `creds.env`, `chrome-profile/` (mặc định) và `aqd_data/`.
 5. Cài lại source phẳng, vá python path cho máy đó, khôi phục/giữ `creds.env` + `chrome-profile`.
-6. Bật lại như luồng thường.
+6. **Dọn `*.py` lạ ở gốc root** (không thuộc payload mới) trước khi copy, để module cũ không `import` đè — **liệt kê** danh sách sắp xoá, **sao lưu** vào `...\stale_py\`, và **KHÔNG** đụng `creds.env`, `chrome-profile/`, `aqd_data/`, `aqd_config.json`.
+7. Bật lại như luồng thường.
+
+### Chrome luôn theo root (không nhiễm chéo profile)
+
+Mỗi root có **cổng CDP riêng** (mặc định `9222`, ghi trong `aqd_config.json` → `cdp_port`) và **profile riêng** `<root>\chrome-profile`. Khi installer/launcher thấy cổng CDP đã mở, nó đọc `--user-data-dir` của tiến trình Chrome đó:
+
+- Trỏ đúng `<root>\chrome-profile` của mình → **dùng lại**.
+- Trỏ **root khác** → **KHÔNG dùng lại**; cảnh báo rõ và mở Chrome ở **cổng kế tiếp còn trống**. Cài vào root mới **không bao giờ** ghi vào profile của root cũ.
+
+Cùng cơ chế theo root cho **mutex single-instance** (`Global\aqd_fetcher_launcher_<root>`) và file `STOP_ALL`.
 
 ## Chọn ID để chạy — theo ĐUÔI, không còn chẵn/lẻ
 
@@ -79,14 +104,28 @@ $env:AQD_CLEAN=1; irm https://raw.githubusercontent.com/truonglh2372/script_goog
 
 **Quy tắc ưu tiên:**
 
-1. **`AQD_ID_SUFFIXES`** (nếu khác rỗng) — lấy ID có **chữ số cuối** nằm trong danh sách, tức `id % 10 in suffixes`. Nhận cả `"1 3 5 7 9"` và `"1,3,5"`; khoảng trắng/dấu phẩy đều được, phần tử rỗng bị bỏ, chỉ nhận chữ số **0–9** (ngoài phạm vi bị báo lỗi rõ ràng, không im lặng). Ví dụ `1 3 5 7 9` → chỉ ID tận cùng 1, 3, 5, 7, 9; `2 4` → chỉ ID tận cùng 2 hoặc 4. Hai tập rời nhau nên không máy nào làm trùng việc của máy nào.
+1. **`AQD_ID_SUFFIXES`** (nếu khác rỗng) — lấy ID có **chữ số cuối** nằm trong danh sách, tức `id % 10 in suffixes`. Nhận cả `"1 3 5 7 9"` và `"1,3,5"`; khoảng trắng/dấu phẩy đều được, phần tử rỗng bị bỏ, chỉ nhận chữ số **0–9** (ngoài phạm vi bị báo lỗi rõ ràng, không im lặng). Ví dụ `1 3 5 7 9` → chỉ ID tận cùng 1, 3, 5, 7, 9; `2 4` → chỉ ID tận cùng 2 hoặc 4. **Đuôi thắng parity khi có**: installer ghi `AQD_PARITY=''` để không mơ hồ.
 2. **Không có `AQD_ID_SUFFIXES`** (rỗng/không đặt) → quay về **`AQD_PARITY`** (`even`/`odd`, mặc định Windows = `even`, Mac = `odd`) **y như cũ**, để máy Mac đang chạy không vỡ.
+
+### Chia việc giữa các máy (QUAN TRỌNG)
+
+**Đuôi ID là duy nhất toàn hệ.** Nếu dùng đuôi thì các máy phải **rời nhau** (không giao); hai máy cùng một đuôi sẽ **cào trùng** đúng những ID đó.
+
+- Chia đôi đúng kiểu đơn giản nhất: **một bên chẵn `0 2 4 6 8`, một bên lẻ `1 3 5 7 9`**.
+- Hoặc chia lệch: Máy A `1 3 5 7`, Máy B `9` + phần còn lại (`0 2 4 6 8`).
+- ⚠ **`AQD_PARITY=odd` (mặc định của Mac) tương đương `1 3 5 7 9`**, và `AQD_PARITY=even` tương đương `0 2 4 6 8`. Nên một máy để `AQD_PARITY=odd` sẽ **trùng với bất kỳ máy nào dùng đuôi lẻ**. Khi dùng đuôi, tốt nhất **tắt parity** trên máy kia (`AQD_PARITY=`).
+
+Installer **cảnh báo ngay khi cài** nếu đuôi giao với một parity, ví dụ đặt `9`:
+
+```
+[!] suffix 9 is INSIDE parity=odd (1,3,5,7,9) - if another machine runs parity=odd you will both fetch id%10=9. Set the other machine to a disjoint set.
+```
 
 Log dòng đầu của `alt.py` ghi rõ đang chọn gì: `id suffixes: 1,3,5,7,9 -> queue_ids_13579.json` (hoặc `parity loop start: even ids, ascending`).
 
 **File queue** đặt tên theo cách chọn để nhiều máy trên cùng một máy tính không đè nhau: `queue_ids_13579.json` (các chữ số sắp tăng dần) khi dùng đuôi; `queue_even.json` / `queue_odd.json` khi dùng parity cũ.
 
-- Cấu hình: `AQD_ROOT` (thư mục gốc, mặc định `C:/aqd`, mọi file trạng thái như `safe_run_log.md`, `aqd_data/`, `STOP` đều theo gốc này), `AQD_ID_SUFFIXES`, `AQD_PARITY`, `AQD_LIST_MAX_PAGES` (số trang list mỗi vòng, mặc định 20; `0`/rỗng = list hết), `AQD_FETCH_LIMIT` (số quán cào mỗi vòng, mặc định 0 = hết).
+- Cấu hình: `AQD_ROOT` (thư mục gốc, mặc định `C:/aqd`, mọi file trạng thái như `safe_run_log.md`, `aqd_data/`, `STOP` đều theo gốc này), `AQD_ID_SUFFIXES`, `AQD_PARITY` (installer ghi rỗng khi đã đặt đuôi), `AQD_LIST_MAX_PAGES` (số trang list mỗi vòng, mặc định 20; `0`/rỗng = list hết), `AQD_FETCH_LIMIT` (số quán cào mỗi vòng, mặc định 0 = hết), `AQD_CDP_PORT` (cổng Chrome CDP, mặc định 9222, ghi trong `aqd_config.json` → `cdp_port`).
 - Trạng thái list từng phần nằm ở `queue*.json.state.json` (ví dụ `queue_ids_13579.json.state.json`): `start_page` là trang sẽ list ở vòng sau. Xoá file này thì vòng sau list lại từ đầu danh sách.
 - `install.ps1` truyền `AQD_ID_SUFFIXES`/`AQD_PARITY`/`AQD_LIST_MAX_PAGES`/`AQD_FETCH_LIMIT` vào tiến trình `alt.py` **qua biến môi trường của tiến trình con** — không sửa `alt.py` khi cài.
 - Dừng: tạo file `STOP_ALL` trong thư mục gốc (dừng sạch giữa 2 quán). `STOP_MENU` chỉ dừng menu worker.
@@ -101,6 +140,7 @@ Windows mặc định **cp1252**, nên mọi `open()` thiếu `encoding="utf-8"`
 python tools/test_id_filter.py          # lọc ID theo đuôi + parity (cả windows/alt.py và mac/alt.py)
 python tools/test_list_paging.py        # list từng phần: ETA, cửa sổ trang, AQD_FETCH_LIMIT, fallback server cũ
 powershell -File tools/test_installer_stream.ps1   # Nat -Stream (tiến độ pip) + tín hiệu sống + timeout
+powershell -File tools/test_installer_guards.ps1   # guard theo root, Chrome theo root, cảnh báo đuôi/parity, CLEAN dọn .py lạ, mọi prompt có mặc định
 ```
 
 `tools/test_list_paging.py` dựng một server giả ở `127.0.0.1` (cả 2 chế độ: có và không có `per_page`) và chạy

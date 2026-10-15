@@ -62,6 +62,7 @@ class Guard:
 
 
 _PW = {}
+_CDP = "http://127.0.0.1:" + (os.environ.get("AQD_CDP_PORT") or "9222")
 _JS = """async (pid)=>{const r=await fetch('/maps/place/?q=place_id:'+pid+'&hl=vi',{credentials:'include'});const t=await r.text();
 const m=t.match(/(\\/maps\\/preview\\/place\\?[^"'\\s]+)/);if(!m)return {err:'nopreview',status:r.status,url:r.url};
 const u=m[1].replace(/&amp;/g,'&');const r2=await fetch(u,{credentials:'include'});return {status:r2.status,body:await r2.text()}}"""
@@ -72,7 +73,7 @@ def browser_place_json(pid):
     if "pg" not in _PW:
         from playwright.sync_api import sync_playwright
         _PW["p"] = sync_playwright().start()
-        b = _PW["p"].chromium.connect_over_cdp("http://127.0.0.1:9222")
+        b = _PW["p"].chromium.connect_over_cdp(_CDP)
         ctx = b.contexts[0]; pg = ctx.pages[0] if ctx.pages else ctx.new_page()
         if "google.com/maps" not in pg.url:
             pg.goto("https://www.google.com/maps?hl=vi"); pg.wait_for_timeout(3000)
