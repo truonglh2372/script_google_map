@@ -44,7 +44,8 @@ Nhóm nặng tách làm **2 nhóm**, hỏi riêng, **Enter = cài**:
 | CLIP (torch + open_clip_torch) | `torch`, `open_clip_torch` | **~156 MB** (riêng `torch` 118 MB) | Lọc ảnh: giữ ảnh món/đồ uống/menu, bỏ ảnh không liên quan |
 | OCR (easyocr) | `easyocr` | **~242 MB** (~124 MB thêm nếu đã cài CLIP, vì chung `torch`) | Đọc ảnh menu và bảng hiệu để tạo món/danh mục |
 
-- Trong lúc cài, output của pip **in trực tiếp ra màn hình** (4 dòng mới nhất mỗi 2 giây) và **cứ 15 giây in một dòng** kiểu `pip CLIP (...) still running after 7m 30s - it is NOT frozen, full log: C:\aqd\pip-heavy.log`; xong thì in **thời gian đã mất** và `rc`. Log đầy đủ nằm ở `C:\aqd\pip-required.log` và `C:\aqd\pip-heavy.log`.
+- Trong lúc cài, output của pip **in trực tiếp ra màn hình** (4 dòng mới nhất mỗi 2 giây) và **cứ 15 giây in một dòng** kiểu `pip CLIP (torch + open_clip_torch) still running after 7m 30s - it is NOT frozen, full log: C:\aqd\pip-heavy-torch.log`; xong thì in **thời gian đã mất** và `rc`.
+- Log đầy đủ nằm ở `C:\aqd\pip-required.log` và `C:\aqd\pip-heavy-<nhóm>.log` (ví dụ `pip-heavy-torch.log`, `pip-heavy-easyocr.log` — mỗi nhóm một file để nhóm sau không ghi đè lý do nhóm trước fail).
 - pip chạy với `--timeout 60 --retries 5`: mạng treo thì pip tự bỏ cuộc và báo lỗi rõ thay vì chờ vô hạn.
 - Máy chỉ có **Python 3.13/3.14**: `torch`/`torchvision` có thể **không có wheel** cho bản đó → pip sẽ **build từ source** (hàng giờ). Installer **dò wheel trước** (`pip index versions torch`, tối đa 2 phút); không có wheel thì **cảnh báo và bỏ qua nhóm nặng** (hỏi lại, mặc định là Không) và khuyên cài Python 3.12 bằng `winget install -e --id Python.Python.3.12`.
 - Bỏ hết nhóm nặng: `-SkipHeavy` (CLIP/OCR yếu hơn, mọi thứ khác vẫn chạy).

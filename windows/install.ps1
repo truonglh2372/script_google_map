@@ -542,12 +542,12 @@ function Invoke-Install {
       }
     }
     if ($heavy) {
-      Set-Content -Path (Join-Path $newRoot 'pip-heavy.log') -Value '' -Encoding ascii -ErrorAction SilentlyContinue
       Note "The heavy groups download a few hundred MB and can take 10-30 minutes on a slow line."
       Note "Go get a coffee - this window prints progress and a 'still running' line every 15s. Do NOT close it."
       foreach ($g in $groups) {
         if (-not (Confirm "Install $($g.name)? ~$($g.mb) MB, 5-20 min. $($g.what)" $true)) { Note "skipped $($g.name)"; continue }
-        $rg = Nat $py ($pipArgs + $g.pkgs) (Join-Path $newRoot 'pip-heavy.log') -Stream -Label "pip $($g.name)"
+        $gLog = Join-Path $newRoot "pip-heavy-$($g.pkgs[0]).log"
+        $rg = Nat $py ($pipArgs + $g.pkgs) $gLog -Stream -Label "pip $($g.name)"
         if ($rg.rc -eq 0) { Ok "$($g.name) installed in $(Fmt-Secs $rg.secs)" }
         else { Warn "$($g.name) pip rc=$($rg.rc) after $(Fmt-Secs $rg.secs) - still runs, only this filtering is weaker (log: $($rg.log))" }
       }
