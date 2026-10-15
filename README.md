@@ -14,9 +14,40 @@ Dán **một dòng** vào PowerShell (repo public, không cần token):
 irm https://raw.githubusercontent.com/truonglh2372/script_google_map/main/windows/install.ps1 | iex
 ```
 
-`install.ps1` tự làm hết: tải source từ GitHub (git clone, fallback zip `codeload`) → cài vào `C:\aqd` với **layout PHẲNG** (mọi `common/*.py` nằm **trực tiếp** trong `C:\aqd` vì `safe_run.py` làm `sys.path.insert(0, "C:/aqd")`) → thay hardcode `C:\Users\Admin\...\python.exe` bằng python thật của máy → cài dependency → **hỏi từng biến môi trường một prompt riêng** (`AQD_ADMIN_EMAIL`, `AQD_ADMIN_PASSWORD` nhập ẩn, `AQD_BASE`) và ghi `C:\aqd\creds.env` → **hỏi đuôi ID** và ghi `C:\aqd\aqd_config.json` → bật Chrome CDP 9222 với profile `C:\aqd\chrome-profile` → khởi động `alt.py`.
+`install.ps1` tự làm hết: tải source từ GitHub (git clone, fallback zip `codeload`) → cài vào `C:\aqd` với **layout PHẲNG** (mọi `common/*.py` nằm **trực tiếp** trong `C:\aqd` vì `safe_run.py` làm `sys.path.insert(0, "C:/aqd")`) → tìm python thật của máy (**ưu tiên 3.12**, cảnh báo nếu máy chỉ có 3.13+) → thay hardcode `C:\Users\Admin\...\python.exe` bằng python đó → cài dependency → **hỏi từng biến môi trường một prompt riêng** (`AQD_ADMIN_EMAIL`, `AQD_ADMIN_PASSWORD` nhập ẩn, `AQD_BASE`) và ghi `C:\aqd\creds.env` → **hỏi đuôi ID**, `AQD_LIST_MAX_PAGES` và `AQD_FETCH_LIMIT` (**Enter là xong**, xem mục dưới) và ghi `C:\aqd\aqd_config.json` → bật Chrome CDP 9222 với profile `C:\aqd\chrome-profile` → khởi động `alt.py`.
 
 Chạy lại nhiều lần không phá gì: `creds.env`, `chrome-profile/` và `aqd_data/` được giữ, chỉ cập nhật source (hỏi trước khi ghi đè `creds.env`). Sau khi Chrome mở, **tự đăng nhập Google** trong cửa sổ đó — script không làm được.
+
+### Lần chạy đầu mất bao lâu
+
+Bấm xong tới lúc cào quán đầu tiên gồm 2 phần: **chờ Chrome** (vài chục giây) và **liệt kê ID từ server** (`1 request / 3 giây`). Bản cũ list **toàn bộ** rồi mới cào → 239 trang ≈ **12 phút** đứng im. Từ bản này `alt.py` chỉ list **`AQD_LIST_MAX_PAGES` trang mỗi vòng** (mặc định **20** ≈ **1 phút**), in ETA trước khi list rồi cào luôn; các vòng sau list tiếp phần còn lại (trang kế tiếp, hết thì quay lại đầu danh sách) nên **không sót quán nào**.
+
+Dòng log trong `alt.out` (và `safe_run_log.md`) trước khi list:
+
+```
+17:30:15 listing pages 1..20 of unnamed 1,3,5,7,9 drafts (20 pages this round, ~1 min of listing) - fetching starts right after
+17:30:16 LIST mode=paged per_page=50 start_page=1 max_pages=20 id_suffix=1,3,5
+17:30:16 listing 241 pages (~12 min at 3s/page) - listing only the first 20/241 pages now (~1 min), fetching starts right after
+17:31:20 FETCH 380 1,3,5,7,9 drafts #12878..#18916
+```
+
+`AQD_LIST_MAX_PAGES=0` (hoặc rỗng) = hành vi cũ: list hết rồi mới cào. `AQD_FETCH_LIMIT=N` = mỗi vòng chỉ cào tối đa N quán rồi list lại (mặc định `0` = không giới hạn) — máy yếu/test dùng `10`.
+
+Khi backend đã có `per_page` / `unnamed` / `id_suffix` / `summary` thì `alt.py` xin `per_page=50` + `unnamed=1` + `id_suffix` để mỗi trang chỉ chứa quán của máy mình; nếu server **chưa** có (hoặc bỏ qua `per_page`), script tự phát hiện và **quay về 24/trang như cũ** — log ghi `LIST mode=legacy …`, không crash, không sót quán.
+
+### Gói nặng (CLIP / OCR) và tiến độ cài
+
+Nhóm nặng tách làm **2 nhóm**, hỏi riêng, **Enter = cài**:
+
+| Nhóm | Gói | Dung lượng tải thật (PyPI, Python 3.12/Windows) | Tác dụng |
+|---|---|---|---|
+| CLIP (torch + open_clip_torch) | `torch`, `open_clip_torch` | **~156 MB** (riêng `torch` 118 MB) | Lọc ảnh: giữ ảnh món/đồ uống/menu, bỏ ảnh không liên quan |
+| OCR (easyocr) | `easyocr` | **~242 MB** (~124 MB thêm nếu đã cài CLIP, vì chung `torch`) | Đọc ảnh menu và bảng hiệu để tạo món/danh mục |
+
+- Trong lúc cài, output của pip **in trực tiếp ra màn hình** (4 dòng mới nhất mỗi 2 giây) và **cứ 15 giây in một dòng** kiểu `pip CLIP (...) still running after 7m 30s - it is NOT frozen, full log: C:\aqd\pip-heavy.log`; xong thì in **thời gian đã mất** và `rc`. Log đầy đủ nằm ở `C:\aqd\pip-required.log` và `C:\aqd\pip-heavy.log`.
+- pip chạy với `--timeout 60 --retries 5`: mạng treo thì pip tự bỏ cuộc và báo lỗi rõ thay vì chờ vô hạn.
+- Máy chỉ có **Python 3.13/3.14**: `torch`/`torchvision` có thể **không có wheel** cho bản đó → pip sẽ **build từ source** (hàng giờ). Installer **dò wheel trước** (`pip index versions torch`, tối đa 2 phút); không có wheel thì **cảnh báo và bỏ qua nhóm nặng** (hỏi lại, mặc định là Không) và khuyên cài Python 3.12 bằng `winget install -e --id Python.Python.3.12`.
+- Bỏ hết nhóm nặng: `-SkipHeavy` (CLIP/OCR yếu hơn, mọi thứ khác vẫn chạy).
 
 Cờ khi cần (gọi qua script block, không cần biến môi trường): `-Root <dir>`, `-Clean`, `-NoStart`, `-NoChrome`, `-SkipHeavy`, `-Yes`.
 
@@ -54,13 +85,26 @@ Log dòng đầu của `alt.py` ghi rõ đang chọn gì: `id suffixes: 1,3,5,7,
 
 **File queue** đặt tên theo cách chọn để nhiều máy trên cùng một máy tính không đè nhau: `queue_ids_13579.json` (các chữ số sắp tăng dần) khi dùng đuôi; `queue_even.json` / `queue_odd.json` khi dùng parity cũ.
 
-- Cấu hình: `AQD_ROOT` (thư mục gốc, mặc định `C:/aqd`, mọi file trạng thái như `safe_run_log.md`, `aqd_data/`, `STOP` đều theo gốc này), `AQD_ID_SUFFIXES`, `AQD_PARITY`.
-- `install.ps1` truyền `AQD_ID_SUFFIXES`/`AQD_PARITY` vào tiến trình `alt.py` **qua biến môi trường của tiến trình con** — không sửa `alt.py` khi cài.
+- Cấu hình: `AQD_ROOT` (thư mục gốc, mặc định `C:/aqd`, mọi file trạng thái như `safe_run_log.md`, `aqd_data/`, `STOP` đều theo gốc này), `AQD_ID_SUFFIXES`, `AQD_PARITY`, `AQD_LIST_MAX_PAGES` (số trang list mỗi vòng, mặc định 20; `0`/rỗng = list hết), `AQD_FETCH_LIMIT` (số quán cào mỗi vòng, mặc định 0 = hết).
+- Trạng thái list từng phần nằm ở `queue*.json.state.json` (ví dụ `queue_ids_13579.json.state.json`): `start_page` là trang sẽ list ở vòng sau. Xoá file này thì vòng sau list lại từ đầu danh sách.
+- `install.ps1` truyền `AQD_ID_SUFFIXES`/`AQD_PARITY`/`AQD_LIST_MAX_PAGES`/`AQD_FETCH_LIMIT` vào tiến trình `alt.py` **qua biến môi trường của tiến trình con** — không sửa `alt.py` khi cài.
 - Dừng: tạo file `STOP_ALL` trong thư mục gốc (dừng sạch giữa 2 quán). `STOP_MENU` chỉ dừng menu worker.
 
 ## Lỗi tiếng Việt trên Windows (đã vá)
 
 Windows mặc định **cp1252**, nên mọi `open()` thiếu `encoding="utf-8"` sẽ **`UnicodeEncodeError`** khi ghi tên/địa chỉ tiếng Việt (ví dụ `Hương Xưa Quán`) và làm `safe_run.py` chết ở bước ghi. Bản production không thấy lỗi vì `alt.py` export `PYTHONUTF8="1"` rồi chạy `safe_run.py` như subprocess; chạy trực tiếp là vỡ. Vì vậy **mọi builtin `open()` mở file text đều phải có `encoding="utf-8"`** (mode `wb`/`rb` giữ nguyên). `os.open()` và `Image.open()` (PIL) **không nhận** tham số `encoding` — với `os.open(...)` thì `encoding` đặt ở `os.fdopen(...)`.
+
+### Kiểm thử offline (không cần mạng, không tải GB)
+
+```powershell
+python tools/test_id_filter.py          # lọc ID theo đuôi + parity (cả windows/alt.py và mac/alt.py)
+python tools/test_list_paging.py        # list từng phần: ETA, cửa sổ trang, AQD_FETCH_LIMIT, fallback server cũ
+powershell -File tools/test_installer_stream.ps1   # Nat -Stream (tiến độ pip) + tín hiệu sống + timeout
+```
+
+`tools/test_list_paging.py` dựng một server giả ở `127.0.0.1` (cả 2 chế độ: có và không có `per_page`) và chạy
+`safe_run.py list` thật; `tools/test_installer_stream.ps1` chạy một tiến trình con in dần để chứng minh output
+được stream và dòng "still running" xuất hiện — không tải package nào.
 
 ## Bí mật
 Token API nằm trong `creds.env` (KHÔNG commit). Không commit chrome-profile, cookie, dữ liệu `aqd_data/`, log, queue.
