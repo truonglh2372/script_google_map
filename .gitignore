@@ -1,5 +1,7 @@
 creds.env
 .env
+aqd_config.json
+__pycache__/
 api_tokens*
 *cookie*
 chrome-profile/

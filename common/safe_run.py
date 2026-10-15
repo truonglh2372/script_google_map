@@ -5,7 +5,8 @@
          any request >20s / 5xx / 429 / timeout -> wait 5 min, retry the place once; second failure -> stop.
 Run: bash -c 'set -a; . C:/aqd/.aqd_session/creds.env; set +a; python3 C:/aqd/safe_run.py prep|push [--limit N]'"""
 import argparse, json, os, random, re, sys, time
-sys.path.insert(0, "C:/aqd")
+ROOT = os.environ.get("AQD_ROOT", "C:/aqd").replace("\\", "/")
+sys.path.insert(0, ROOT)
 import maps_fetch as mf
 import aqd_api
 from aqd_api import AQD, AQDError, APIError, API, DATA_DIR, VERIFY, maps_place_id, normalize_fields, _url_hash, _upsize_google
@@ -16,16 +17,16 @@ try:
 except Exception:
     PF = None
 
-LOG = "C:/aqd/safe_run_log.md"
-PROG = "C:/aqd/aqd_progress.md"
-QUEUE = "C:/aqd/queue.json"
+LOG = ROOT + "/safe_run_log.md"
+PROG = ROOT + "/aqd_progress.md"
+QUEUE = ROOT + "/queue.json"
 GAP, SLOW, HTTP_TO, PHOTO_CHUNK, COOLDOWN = 3.0, 20.0, 45, 5, 300
-STOPFILE = "C:/aqd/STOP"
+STOPFILE = ROOT + "/STOP"
 
 
 def log(s):
     line = f"- {time.strftime('%Y-%m-%d %H:%M:%S')} {s}"
-    open(LOG, "a").write(line + "\n"); print(line, flush=True)
+    open(LOG, "a", encoding="utf-8").write(line + "\n"); print(line, flush=True)
 
 
 class Overload(Exception):
@@ -185,10 +186,11 @@ def cmd_prep(args):
     rows = []
     for pg in range(1, args.pages + 1):
         b = G.req("GET", f"{API}?status=draft&page={pg}")
+        if pg == 1 or pg % 20 == 0: log(f"LIST page {pg} (total {b.get('total_count')}) ...")
         rows += [r for r in b["restaurants"] if not (r.get("name") or "").strip()]
         if not b["restaurants"]: break
     rows = sorted({r["id"]: r for r in rows}.values(), key=lambda r: -r["id"])
-    json.dump(rows, open(args.queue, "w"), ensure_ascii=False)
+    json.dump(rows, open(args.queue, "w", encoding="utf-8"), ensure_ascii=False)
     log(f"PREP listed {len(rows)} unnamed drafts, top {rows[0]['id'] if rows else None}; reads={G.n} avg={G.tt/max(1,G.n):.2f}s max={G.max:.1f}s")
     done = 0; blocked = False
     for r in rows:
@@ -207,8 +209,8 @@ def cmd_prep(args):
         if info is None:
             log(f"#{rid} PREP SKIP {reason}"); continue
         os.makedirs(os.path.dirname(f), exist_ok=True)
-        json.dump(info, open(f + ".tmp", "w"), ensure_ascii=False, indent=1); os.replace(f + ".tmp", f)
-        open(os.path.join(DATA_DIR, str(rid), "SAFE_PREP"), "w").write(time.strftime("%F %T"))
+        json.dump(info, open(f + ".tmp", "w", encoding="utf-8"), ensure_ascii=False, indent=1); os.replace(f + ".tmp", f)
+        open(os.path.join(DATA_DIR, str(rid), "SAFE_PREP"), "w", encoding="utf-8").write(time.strftime("%F %T"))
         done += 1
         log(f"#{rid} PREP {info.get('name','')[:40]!r} cat={info['category']} photos={len(info['photo_urls'])}/{info['_maps']['count']} "
             f"phone={'y' if info.get('phone') else 'n'} hours={'y' if info.get('opening_hours_text') else 'n'} menu_ph={info['has_menu_photos']}"
@@ -222,11 +224,11 @@ SKIP_KEYS = ("_sv", "cover", "logo", "stay_draft", "stay_reason", "note", "photo
 
 def push_one(G, rid):
     folder = os.path.join(DATA_DIR, str(rid))
-    info = json.load(open(os.path.join(folder, "info.json")))
+    info = json.load(open(os.path.join(folder, "info.json"), encoding="utf-8"))
     recp = os.path.join(folder, "applied.json")
-    rec = json.load(open(recp)) if os.path.exists(recp) else {}
+    rec = json.load(open(recp, encoding="utf-8")) if os.path.exists(recp) else {}
     rec.setdefault("urls", {})
-    save = lambda: (json.dump(rec, open(recp + ".tmp", "w"), ensure_ascii=False, indent=1), os.replace(recp + ".tmp", recp))
+    save = lambda: (json.dump(rec, open(recp + ".tmp", "w", encoding="utf-8"), ensure_ascii=False, indent=1), os.replace(recp + ".tmp", recp))
     t0 = time.time(); parts = []; warn = []
     cur = G.req("GET", f"{API}/{rid}")["restaurant"]
     if cur.get("status") != "draft" or ((cur.get("name") or "").strip() and not rec.get("info")):
@@ -321,22 +323,22 @@ def cmd_push(args):
                 tries += 1
                 log(f"#{rid} OVERLOAD ({e}) try {tries}")
                 if tries >= 2:
-                    log(f"#{rid} second failure -> STOP ENTIRELY"); open(PROG, "a").write(f"{rid} | safe | STOPPED overload: {e}\n"); open(STOPFILE, "w").write(str(e)); return "STOP"
+                    log(f"#{rid} second failure -> STOP ENTIRELY"); open(PROG, "a", encoding="utf-8").write(f"{rid} | safe | STOPPED overload: {e}\n"); open(STOPFILE, "w", encoding="utf-8").write(str(e)); return "STOP"
                 time.sleep(COOLDOWN)
             except Exception as e:
                 kind, msg = "error", f"{type(e).__name__}: {str(e)[:200]}"; break
         n += 1
         if kind in ("ok", "warn"):
-            open(os.path.join(DATA_DIR, str(rid), "SAFE_DONE"), "w").write(time.strftime("%F %T"))
-        info = json.load(open(os.path.join(DATA_DIR, str(rid), "info.json")))
+            open(os.path.join(DATA_DIR, str(rid), "SAFE_DONE"), "w", encoding="utf-8").write(time.strftime("%F %T"))
+        info = json.load(open(os.path.join(DATA_DIR, str(rid), "info.json"), encoding="utf-8"))
         line = f"{rid} | safe | {info.get('name','')} | {info.get('category')} | {kind.upper()} {msg} - {time.strftime('%F %H:%M')}"
-        open(PROG, "a").write(line + "\n"); log(f"#{rid} {kind.upper()} {msg}")
+        open(PROG, "a", encoding="utf-8").write(line + "\n"); log(f"#{rid} {kind.upper()} {msg}")
         if n % 20 == 0:
             log(f"health: reqs={G.n} avg={G.tt/max(1,G.n):.2f}s max={G.max:.1f}s"); time.sleep(30)
     if len(ids) > 1: log(f"PUSH END {n} places; reqs={G.n} avg={G.tt/max(1,G.n):.2f}s max={G.max:.1f}s")
 
 
-BACKFILL = "C:/aqd/aqd_photo_backfill.txt"
+BACKFILL = ROOT + "/aqd_photo_backfill.txt"
 MAPS_MIN_GAP, MAPS_JITTER = 30.0, 15.0
 BACKOFF_MIN = [30, 60, 120]
 
@@ -365,17 +367,18 @@ def cmd_list(args):
     G = Guard(); rows = []; pg = 1
     while True:
         b = G.req("GET", f"{API}?status=draft&page={pg}")
+        if pg == 1 or pg % 20 == 0: log(f"LIST page {pg}/{b.get('total_count', 0) // 24 + 1} (total {b.get('total_count')}) ...")
         if not b["restaurants"]: break
         rows += [r for r in b["restaurants"] if not (r.get("name") or "").strip() and args.floor < r["id"] <= args.ceil]
         if min(r["id"] for r in b["restaurants"]) <= args.floor or pg >= 500: break
         pg += 1
     rows = sorted({r["id"]: r for r in rows}.values(), key=lambda r: -r["id"])
-    json.dump(rows, open(args.queue, "w"), ensure_ascii=False)
+    json.dump(rows, open(args.queue, "w", encoding="utf-8"), ensure_ascii=False)
     log(f"LIST {len(rows)} unnamed drafts > {args.floor}: {rows[0]['id'] if rows else None}..{rows[-1]['id'] if rows else None}; pages={pg} avg={G.tt/max(1,G.n):.2f}s max={G.max:.1f}s")
 
 
 def cmd_run(args):
-    rows = json.load(open(args.queue)); GR = Guard()
+    rows = json.load(open(args.queue, encoding="utf-8")); GR = Guard()
     last_maps = 0.0; streak = 0; level = 0
     for r in rows:
         if r["id"] <= args.floor: log(f"reached floor {args.floor}; stop"); break
@@ -392,7 +395,7 @@ def cmd_run(args):
                 log(f"#{rid} OVERLOAD on pre-check ({e}); wait 5 min"); time.sleep(COOLDOWN)
                 try: cur = GR.req("GET", f"{API}/{rid}")["restaurant"]
                 except Overload as e2:
-                    log(f"#{rid} second failure -> STOP ENTIRELY"); open(STOPFILE, "w").write(str(e2)); return
+                    log(f"#{rid} second failure -> STOP ENTIRELY"); open(STOPFILE, "w", encoding="utf-8").write(str(e2)); return
             if (cur.get("name") or "").strip() or cur.get("status") != "draft":
                 log(f"#{rid} SKIP pre-check: taken (status={cur.get('status')} name={cur.get('name')!r})")
                 _taken = globals().get("_TAKEN", 0) + 1; globals()["_TAKEN"] = _taken
@@ -408,7 +411,7 @@ def cmd_run(args):
             except mf.Blocked as e:
                 log(f"#{rid} Maps BLOCKED {e}; back off 2h")
                 if os.environ.get("AQD_ALT"):
-                    open("C:/aqd/fetch_backoff.txt", "w").write(str(time.time() + 7200)); sys.exit(3)
+                    open(ROOT + "/fetch_backoff.txt", "w", encoding="utf-8").write(str(time.time() + 7200)); sys.exit(3)
                 time.sleep(7200); continue
             except Exception as e:
                 log(f"#{rid} PREP ERROR {type(e).__name__}: {str(e)[:150]}"); continue
@@ -422,11 +425,11 @@ def cmd_run(args):
                 if level: log(f"Maps full data back at #{rid}; normal pace")
                 streak = 0; level = 0
             if lim:
-                open(BACKFILL, "a").write(f"{rid} {cnt} {emb} # safe_run limited: {lim} {time.strftime('%F %H:%M')}\n")
+                open(BACKFILL, "a", encoding="utf-8").write(f"{rid} {cnt} {emb} # safe_run limited: {lim} {time.strftime('%F %H:%M')}\n")
 
             f = os.path.join(DATA_DIR, str(rid), "info.json"); os.makedirs(os.path.dirname(f), exist_ok=True)
-            json.dump(info, open(f, "w"), ensure_ascii=False, indent=1)
-            open(os.path.join(DATA_DIR, str(rid), "SAFE_PREP"), "w").write(time.strftime("%F %T"))
+            json.dump(info, open(f, "w", encoding="utf-8"), ensure_ascii=False, indent=1)
+            open(os.path.join(DATA_DIR, str(rid), "SAFE_PREP"), "w", encoding="utf-8").write(time.strftime("%F %T"))
             log(f"#{rid} PREP {info.get('name','')[:40]!r} cat={info['category']} photos={len(info['photo_urls'])}/{info['_maps']['count']} thin={info['_maps']['thin']} via={info['_maps']['via']} gallery={info['_maps'].get('gallery')} photos_skipped={info['_maps'].get('photos_skipped',0)}" + (f" STAY_DRAFT:{reason}" if reason else ""))
         args.ids = [rid]; args.force = True; args.limit = 0
         if cmd_push(args) == "STOP": return
@@ -434,16 +437,16 @@ def cmd_run(args):
             m = BACKOFF_MIN[min(level, 2)]; level += 1
             log(f"Maps truly limited {streak} in a row (last #{rid}: {lim}); pause Maps {m} min (level {level})")
             if os.environ.get("AQD_ALT"):
-                open("C:/aqd/fetch_backoff.txt", "w").write(str(time.time() + m * 60)); sys.exit(3)
+                open(ROOT + "/fetch_backoff.txt", "w", encoding="utf-8").write(str(time.time() + m * 60)); sys.exit(3)
             if not nap(m * 60): log("STOP file; end run"); break
 
 
 def cmd_backfill(args):
     """Re-fetch Maps for ids in BACKFILL; push only photo URLs not uploaded yet (per applied.json). No info/status change."""
     donef = BACKFILL + ".done"
-    done = {l.split()[0] for l in open(donef)} if os.path.exists(donef) else set()
+    done = {l.split()[0] for l in open(donef, encoding="utf-8")} if os.path.exists(donef) else set()
     ids = []
-    for l in open(BACKFILL):
+    for l in open(BACKFILL, encoding="utf-8"):
         t = l.split()
         if t and t[0].isdigit() and t[0] not in done and int(t[0]) not in ids: ids.append(int(t[0]))
     ids.sort(reverse=True)
@@ -453,7 +456,7 @@ def cmd_backfill(args):
         if os.path.exists(STOPFILE): log("STOP file; end backfill"); break
         recp = os.path.join(DATA_DIR, str(rid), "applied.json")
         if not os.path.exists(recp): continue
-        rec = json.load(open(recp)); rec.setdefault("urls", {})
+        rec = json.load(open(recp, encoding="utf-8")); rec.setdefault("urls", {})
         w = MAPS_MIN_GAP + random.uniform(0, MAPS_JITTER) - (time.time() - last_maps)
         if w > 0 and not nap(w): break
         try:
@@ -484,10 +487,10 @@ def cmd_backfill(args):
                     if _upsize_google(c["url"]) in bad: continue
                     ph = next(it_, None)
                     if ph: rec["urls"][_url_hash(c["url"])] = {"url": c["url"], "photo_id": int(ph["id"])}; added += 1
-                json.dump(rec, open(recp, "w"), ensure_ascii=False, indent=1)
+                json.dump(rec, open(recp, "w", encoding="utf-8"), ensure_ascii=False, indent=1)
         except Overload as e:
             log(f"#{rid} BACKFILL OVERLOAD {e}; wait 5 min"); nap(COOLDOWN); continue
-        open(donef, "a").write(f"{rid} +{added} of {len(info['photo_urls'])} {time.strftime('%F %H:%M')}\n")
+        open(donef, "a", encoding="utf-8").write(f"{rid} +{added} of {len(info['photo_urls'])} {time.strftime('%F %H:%M')}\n")
         log(f"#{rid} BACKFILL +{added} new photos (maps {len(info['photo_urls'])}/{m_.get('count')})")
 
 

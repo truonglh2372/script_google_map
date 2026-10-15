@@ -212,7 +212,7 @@ def main():
                 log(f"#{rid} SKIP unsure: {SKIP_REASON.get('r')}"); open(DONE, "a", encoding="utf-8").write(f"{rid} skip-unsure {time.strftime('%F %H:%M')}\n"); continue
             if urls is None:
                 log(f"#{rid} CAPTCHA/unusual traffic -> stop photos, back off 2h (not bypassing)")
-                open(R + "/photos_backoff.txt", "w").write(str(time.time() + 7200)); sys.exit(4)
+                open(R + "/photos_backoff.txt", "w", encoding="utf-8").write(str(time.time() + 7200)); sys.exit(4)
             recp = folder + "/applied.json"
             rec = json.load(open(recp, encoding="utf-8")) if os.path.exists(recp) else {}
             rec.setdefault("urls", {})
