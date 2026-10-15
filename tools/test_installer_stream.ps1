@@ -92,7 +92,7 @@ print("Installing collected packages: torch", flush=True)
   Head "install.ps1 wiring"
   CheckTrue "pip gets --timeout 60 --retries 5" ($raw -match "'--timeout', '60', '--retries', '5'")
   CheckTrue "the heavy groups stream" ($raw -match '-Stream -Label "pip ')
-  CheckTrue "the heavy log is in the install root" ($raw -match "'pip-heavy\.log'")
+  CheckTrue "each heavy group gets its own log" ($raw -match [regex]::Escape('"pip-heavy-$($g.pkgs[0]).log"'))
   CheckTrue "CLIP and OCR are separate groups" (($raw -match "CLIP \(torch \+ open_clip_torch\)") -and ($raw -match "OCR \(easyocr\)"))
   CheckTrue "the torch wheel probe exists" ($raw -match "'index', 'versions', 'torch'")
   CheckTrue "Python 3.12 is preferred and the minor is checked" (($raw -match 'ver\.minor -ne 12') -and ($raw -match "12 \{ 0 \} 11 \{ 1 \}"))
