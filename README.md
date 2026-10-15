@@ -24,7 +24,7 @@ Cờ khi cần (gọi qua script block, không cần biến môi trường): `-R
 & ([scriptblock]::Create((irm https://raw.githubusercontent.com/truonglh2372/script_google_map/main/windows/install.ps1))) -Root C:\aqd_test -NoStart -Yes
 ```
 
-Cài vào chỗ khác khi test: đặt `$env:AQD_ROOT` trước khi `iex`.
+Cài vào chỗ khác khi test: đặt `$env:AQD_ROOT` trước khi `iex`. Cài payload của nhánh/tag khác (test trước khi merge): đặt `$env:AQD_REPO_REF` (mặc định `main`).
 
 ### Dọn cài lại cho máy đã cài bản cũ (1 lệnh)
 

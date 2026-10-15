@@ -13,6 +13,9 @@
   Install somewhere else (tests):
     $env:AQD_ROOT='C:\aqd_test'; irm https://raw.githubusercontent.com/truonglh2372/script_google_map/main/windows/install.ps1 | iex
 
+  Install the payload of another branch/tag (testing a change before merging it):
+    $env:AQD_REPO_REF='feature/1-one-command-installer'; irm <the same url> | iex
+
   Same thing without env vars, when called as a script block:
     & ([scriptblock]::Create((irm https://raw.githubusercontent.com/truonglh2372/script_google_map/main/windows/install.ps1))) -Root C:\aqd_test -Clean -NoStart -Yes
 
@@ -123,18 +126,19 @@ function Get-AqdProcs([string]$ForRoot) {
   return @($all | Where-Object { $_.CommandLine -match $needle })
 }
 
-function Get-Source([string]$Work) {
+function Get-Source([string]$Work, [string]$Ref) {
   if (Get-Command git -ErrorAction SilentlyContinue) {
     $dir = Join-Path $Work 'repo'
-    Note "git clone --depth 1 $RepoGit"
-    $r = Nat 'git' @('clone', '--quiet', '--depth', '1', $RepoGit, $dir)
+    Note "git clone --depth 1 --branch $Ref $RepoGit"
+    $r = Nat 'git' @('clone', '--quiet', '--depth', '1', '--branch', $Ref, $RepoGit, $dir)
     if ($r.rc -eq 0 -and (Test-Path (Join-Path $dir 'common'))) { return $dir }
     Warn "git clone failed (rc=$($r.rc)); falling back to zip"
     Get-Content $r.log -Tail 5 -ErrorAction SilentlyContinue | ForEach-Object { Note $_ }
   } else { Note "no git; using zip" }
   $zip = Join-Path $Work 'src.zip'
-  Note "codeload zip: $RepoZip"
-  Invoke-WebRequest -UseBasicParsing -Uri $RepoZip -OutFile $zip
+  $url = if ($Ref -eq 'main') { $RepoZip } else { "https://codeload.github.com/truonglh2372/script_google_map/zip/refs/heads/$Ref" }
+  Note "codeload zip: $url"
+  Invoke-WebRequest -UseBasicParsing -Uri $url -OutFile $zip
   $un = Join-Path $Work 'unzip'
   Expand-Archive -Path $zip -DestinationPath $un -Force
   $dir = Get-ChildItem $un -Directory | Select-Object -First 1
@@ -150,8 +154,8 @@ function Install-Flat([string]$Src, [string]$NewRoot, [string]$Py, [string]$Suff
     $copied++
   }
   foreach ($f in @('alt.py', 'start_fetcher.ps1', 'start_menu_worker.ps1', 'aqd_fetcher.cmd', 'aqd_menu_worker.cmd')) {
-    $src = Join-Path $Src "windows\$f"
-    if (Test-Path $src) { Copy-Item -Force $src (Join-Path $NewRoot $f); $copied++ } else { Warn "missing windows\$f" }
+    $from = Join-Path $Src "windows\$f"
+    if (Test-Path $from) { Copy-Item -Force $from (Join-Path $NewRoot $f); $copied++ } else { Warn "missing windows\$f" }
   }
   Ok "copied $copied files into $NewRoot (FLAT layout: every .py sits directly in $NewRoot)"
   $envLine = "`$env:AQD_ROOT='$NewRoot'; `$env:AQD_ID_SUFFIXES='$Suffixes'; `$env:AQD_PARITY='$Parity'`r`n"
@@ -315,6 +319,8 @@ function Invoke-Install {
   if (-not $newRoot) { $newRoot = $env:AQD_ROOT }
   if (-not $newRoot) { $newRoot = $DefaultRoot }
   $newRoot = ([string]$newRoot).TrimEnd('\')
+  $ref = $env:AQD_REPO_REF
+  if (-not $ref) { $ref = 'main' }
 
   $work = Join-Path $env:TEMP ('aqd-install-' + [guid]::NewGuid().ToString('N').Substring(0, 8))
   New-Item -ItemType Directory -Force -Path $work | Out-Null
@@ -322,6 +328,7 @@ function Invoke-Install {
     Head "aqd installer - one command"
     Note "root   : $newRoot"
     Note "mode   : $(if ($clean) { 'CLEAN reinstall' } else { 'fresh install / update' })"
+    Note "ref    : $ref"
     Note "source : $RawBase/windows/install.ps1"
 
     Head "1/8 Python"
@@ -363,7 +370,7 @@ function Invoke-Install {
     }
 
     Head "6/8 Fetch source + install flat"
-    $src = Get-Source $work
+    $src = Get-Source $work $ref
     Ok "source: $src"
     $cfg = Ask-Suffixes $newRoot
     WriteNoBom (Join-Path $newRoot 'aqd_config.json') (@{ id_suffixes = $cfg.suffixes; parity = $cfg.parity } | ConvertTo-Json)
