@@ -1,0 +1,5 @@
+# Shell scripts and launchd plists must be LF in the working tree on every OS: a CRLF shebang breaks
+# `bash` (mac/install.sh is also served raw to `curl | bash`, and tools/test_installer_mac.sh is run with
+# bash on Windows checkouts too), while Windows checkouts default to core.autocrlf=true.
+*.sh text eol=lf
+*.plist text eol=lf
