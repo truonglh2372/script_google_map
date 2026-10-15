@@ -3,7 +3,7 @@
 ## Cấu trúc
 - `common/` — dùng chung 2 máy: `aqd_api.py` (client API admin), `maps_fetch.py` (lấy thông tin quán, không cần trình duyệt), `safe_run.py` (chạy từng quán: list/run, đánh dấu `SAFE_DONE`), `photo_filter.py` (lọc ảnh bằng CLIP), `menu_worker.py` + `menu_ocr.py` + `menu_vocab.json` (OCR ảnh menu → tạo món/danh mục, đọc SĐT bảng hiệu).
 - `windows/` — máy Admin: `install.ps1` (cài 1 lệnh), `alt.py` (vòng lặp fetch), `start_fetcher.ps1`, `start_menu_worker.ps1`, `aqd_*.cmd` (đặt trong thư mục Startup để tự chạy khi đăng nhập).
-- `mac/` — Mac mini: script cài đặt; launchd plist (`aqd.alt`, `aqd.chrome`, `aqd.menu`) trong `mac/launchd/`.
+- `mac/` — Mac mini: `install.sh` (**cài 1 lệnh**, tương đương `windows/install.ps1`), `alt.py`, và launchd plist **mẫu** (`aqd.alt`, `aqd.chrome`, `aqd.menu`) trong `mac/launchd/`; `install.sh` thay `__AQD_*__` theo root rồi ghi vào `~/Library/LaunchAgents/`. `install_mac.sh` **đã bị thay thế** (xem đầu file).
 - `tools/` — `cleanup.py` (sửa/ẩn món sai đã ghi), `build_vocab.py`, các patch.
 
 ## Cài trên máy Windows mới — 1 lệnh duy nhất
@@ -98,6 +98,86 @@ Mỗi root có **cổng CDP riêng** (mặc định `9222`, ghi trong `aqd_confi
 
 Cùng cơ chế theo root cho **mutex single-instance** (`Global\aqd_fetcher_launcher_<root>`) và file `STOP_ALL`.
 
+## Cài trên Mac mini — 1 lệnh duy nhất
+
+Dán **một dòng** vào Terminal (repo public, không cần token):
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/truonglh2372/script_google_map/main/mac/install.sh | bash
+```
+
+`mac/install.sh` là bản tương đương `windows/install.ps1`: tải source từ GitHub (`git clone`, fallback zip `codeload`) → cài vào `$HOME/aqd` với **layout PHẲNG** (mọi `common/*.py` + `common/menu_vocab.json` nằm **trực tiếp** trong `$R/` vì `safe_run.py` làm `sys.path.insert(0, AQD_ROOT)`; thêm `mac/alt.py` → `$R/alt.py`; riêng trên macOS `common/photos_new.py` được cài **thành** `$R/photos.py` vì `common/photos.py` hardcode `C:/aqd`) → dọn `.py` lạ ở gốc root (**có sao lưu, có liệt kê**, không đụng `creds.env` / `chrome-profile` / `aqd_data` / `aqd_config.json`) → dùng lại `$R/venv` nếu có, không thì tạo mới → hỏi từng biến môi trường một prompt riêng → ghi `creds.env` + `aqd_config.json` → mở Chrome CDP **theo root** → chạy `alt.py` (hoặc đăng ký launchd).
+
+Chạy thử **không đổi gì trên máy** (khuyến nghị, nhất là Mac đang chạy bản vá tay):
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/truonglh2372/script_google_map/main/mac/install.sh | AQD_DRY_RUN=1 bash
+```
+
+Đổi chỗ cài: đặt `AQD_ROOT="$HOME/aqd_test"` trước `curl`. Cài payload của nhánh/tag khác khi test: `AQD_REPO_REF=<nhánh>`. Cài từ checkout local, không cần mạng: `AQD_SRC_DIR=/duong/dan bash mac/install.sh`. Chạy như file: `bash mac/install.sh --root DIR --clean --no-start --no-chrome --skip-heavy --yes --dry-run`.
+
+Câu trả lời được đọc từ `/dev/tty`, nên `curl ... | bash` vẫn hỏi bình thường (không ăn mất dòng script).
+
+### Mọi prompt đều có mặc định — Enter là xong
+
+Installer in ngay đầu một dòng tóm tắt để biết Enter sẽ ra gì:
+
+```
+Enter = defaults: base=https://anuongquanhday.com  CLIP=no  OCR=no  id_suffixes=<required>  list_max_pages=20  fetch_limit=0  startup=no
+REQUIRED (no default, asked until valid): AQD_ID_SUFFIXES (digits 0-9), AQD_ADMIN_EMAIL. Everything else is Enter.
+AQD_ADMIN_PASSWORD: Enter keeps the value already in creds.env when there is one.
+```
+
+| Prompt | Enter = | Bắt buộc |
+|---|---|---|
+| `AQD_ADMIN_EMAIL` | — (không có mặc định) | **BẮT BUỘC**; phải có `@`, sai thì hỏi lại |
+| `AQD_ADMIN_PASSWORD` | giữ giá trị đang có trong `creds.env` (chưa có file thì **bắt buộc**) | có điều kiện |
+| `AQD_BASE` | `https://anuongquanhday.com` | không |
+| CLIP (torch + open_clip_torch, ~156 MB) | **No** (in dung lượng trước khi hỏi) | không |
+| OCR (easyocr, ~242 MB) | **No** | không |
+| `AQD_ID_SUFFIXES` | — (không có mặc định) | **BẮT BUỘC**; chỉ chữ số 0-9, nhận `"1 3 5"` và `"1,3,5"`; `even`/`odd` quay về `AQD_PARITY`; sai thì hỏi lại |
+| `AQD_LIST_MAX_PAGES` | `20` | không |
+| `AQD_FETCH_LIMIT` | `0` | không |
+| Đăng ký auto-start (launchd) | **No**, trừ khi root là mặc định (`$HOME/aqd`) | không |
+
+Giống Windows: **cảnh báo trùng đuôi/parity** (`suffix 9 is INSIDE parity=odd (1,3,5,7,9) - ...`) và khi đã có đuôi thì ghi `AQD_PARITY=''` để hết mơ hồ.
+
+### An toàn với bản vá tay đang chạy trên Mac
+
+Mac hiện chạy code khác repo (`alt.py` lấy từ `/tmp/alt_mac.py`), nên trước khi ghi đè installer **luôn**:
+
+1. **Sao lưu + in dấu vân tay** `alt.py` và `safe_run.py` hiện có: dòng `existing alt.py: sha256=<hex> lines=<n>` cho từng file, bản sao ở `~/aqd_backup_<timestamp>/preinstall_py/`.
+2. Nếu `alt.py` trên Mac **khác** `mac/alt.py` của repo → **cảnh báo rõ** `this Mac's alt.py DIFFERS from the repo's mac/alt.py - installing the repo version OVERWRITES a different build`, in **cả hai** sha256 + số dòng, in lệnh `diff -u` để tự xem, và **hỏi xác nhận — mặc định `No`**. Chọn No/Enter → installer **dừng** (exit 3), **không ghi gì**, và nói rõ backup ở đâu. Ai đang chạy không có console (stdin không phải terminal) thì mặc định cũng là No → dừng an toàn.
+3. Nếu thấy `queue6.json` / `queue8.json` / `alt_step.txt` → ghi nhận **«thế hệ cũ»**, sao lưu vào `~/aqd_backup_<timestamp>/old_queue/` rồi xoá để không tranh chấp với `queue_all_unnamed.json` / `queue_ids_*.json` của bản mới.
+
+### launchd plist theo root (không hardcode user)
+
+`mac/launchd/*.plist` giờ là **mẫu** (có `__AQD_ROOT__`, `__AQD_PY__`, `__AQD_ID_SUFFIXES__`, …), **không** còn `/Users/hoangtruongle`. Khi đăng ký auto-start, `install.sh` render theo root và ghi vào `~/Library/LaunchAgents/aqd.{alt,chrome,menu}.plist` (bản render cũng để ở `$R/launchd/`). `aqd.alt.plist` **thêm `EnvironmentVariables`**: `AQD_ROOT`, `AQD_ID_SUFFIXES`, `AQD_PARITY`, `AQD_LIST_MAX_PAGES`, `AQD_FETCH_LIMIT`, `AQD_CDP_PORT` (trước đây **không có chỗ bơm**, nên phiên đăng nhập chạy sai cấu hình). `launchctl bootout` chỉ chạy khi plist đang có trỏ về **root này**; plist của root khác chỉ bị cảnh báo, không đụng. `alt.py` cũng đọc `aqd_config.json` làm fallback cho `cdp_port` / `list_max_pages` / `fetch_limit`.
+
+### Dọn và cài lại (1 lệnh)
+
+Máy đã cài bản cũ (tiến trình đang chạy, `STOP_ALL`/`STOP`, `queue*.json`, `aqd_data/`, `chrome-profile/`, `creds.env`) thì dùng **chế độ dọn**, đúng thứ tự **dừng → báo cáo → sao lưu → xoá → cài lại**:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/truonglh2372/script_google_map/main/mac/install.sh | AQD_CLEAN=1 bash
+```
+
+1. Tạo `STOP_ALL` + `STOP` trong **đúng root đang cài**, chờ tối đa 60s cho tiến trình **của root đó** tự thoát; sau đó liệt kê tiến trình còn lại và **hỏi trước khi** kill (`Kill -9 the N process(es) under <root> (and only those)?`, mặc định **No**). Tiến trình `alt.py`/`safe_run.py`/`menu_worker.py` thuộc **root khác** chỉ được **cảnh báo, KHÔNG kill**.
+2. **Báo cáo trước khi xoá**: số quán trong `aqd_data/`, `SAFE_DONE`, `SAFE_PREP`, số dòng `safe_run_log.md`, có `fetch_backoff.txt` không, dung lượng `chrome-profile/`, số `queue*.json`.
+3. **Sao lưu cứu hộ** `~/aqd_backup_<timestamp>`: `creds.env`, `chrome-profile/`, `aqd_data/` (mặc định **Yes**). `chrome-profile` chứa phiên đăng nhập Google — mất là phải đăng nhập lại.
+4. Xoá trạng thái gây xung đột: `STOP*`, `queue*.json`, `parity_tries.json`, `fetch_backoff.txt`, `alt.out`, `alt.nohup`, `safe_run_log.md`, `aqd_progress.md`, `aqd_api_log.md`, `start_fetcher.log`, `menu_worker.*`, `photos_backoff.txt`, `__pycache__/`, `.aqd_session/`. **Giữ** `creds.env`, `chrome-profile/`, `aqd_data/`, `aqd_config.json`.
+5. Cài lại source phẳng (dọn `.py` lạ có sao lưu), dùng lại `venv`, giữ `creds.env`.
+6. In ở cuối: lệnh xem log (`tail -f $R/alt.out`), lệnh dừng (`touch $R/STOP_ALL`), và lệnh chạy lại.
+
+`AQD_DRY_RUN=1` in **mọi hành động sẽ làm** (mọi dòng có tiền tố `[dry-run]`) mà không thực thi gì trên máy — chỉ đọc (tải source vào thư mục tạm để so sánh `alt.py`), nên chủ dự án kiểm được toàn bộ kế hoạch trước khi chạy thật.
+
+### Chưa kiểm chứng được (không có máy Mac)
+
+Máy phát triển là Windows: **không có** `launchctl`, `caffeinate`, `/Applications/Google Chrome.app`, `plutil`. Vì vậy:
+
+- **Đã chạy**: `bash -n mac/install.sh` (cú pháp), harness mô phỏng `tools/test_installer_mac.sh` (stub `launchctl`/`pgrep`/`pkill`/`curl`/`caffeinate`/`open`/`git`/`python3`/`sha256sum`, chạy **toàn bộ luồng** cài mới + chế độ dọn), `python tools/test_id_filter.py`, `python tools/test_list_paging.py`, và 2 test installer Windows (không đổi).
+- **CHƯA chạy được**: cài thật rồi `launchctl bootstrap`/`caffeinate`/Chrome thật trên macOS; `plutil -lint` plist đã render; `shellcheck` (không có trên máy này). Cần chủ dự án chạy `AQD_DRY_RUN=1` trước trên Mac, rồi cài thật và để ý bước 8 (Chrome/launchd) và `~/Library/LaunchAgents/aqd.alt.plist`.
+
 ## Chọn ID để chạy — theo ĐUÔI, không còn chẵn/lẻ
 
 `alt.py` liệt kê toàn bộ quán nháp chưa có tên trên server rồi lọc phần của máy mình, chạy tăng dần; hết thì ngủ 10 phút rồi liệt kê lại.
@@ -141,6 +221,7 @@ python tools/test_id_filter.py          # lọc ID theo đuôi + parity (cả wi
 python tools/test_list_paging.py        # list từng phần: ETA, cửa sổ trang, AQD_FETCH_LIMIT, fallback server cũ
 powershell -File tools/test_installer_stream.ps1   # Nat -Stream (tiến độ pip) + tín hiệu sống + timeout
 powershell -File tools/test_installer_guards.ps1   # guard theo root, Chrome theo root, cảnh báo đuôi/parity, CLEAN dọn .py lạ, mọi prompt có mặc định
+bash tools/test_installer_mac.sh        # installer Mac: prompt/mặc định, layout phẳng, aqd_config.json, cảnh báo trùng, guard root, Chrome theo root, plist, CLEAN (mọi công cụ macOS đều được stub; cần bash)
 ```
 
 `tools/test_list_paging.py` dựng một server giả ở `127.0.0.1` (cả 2 chế độ: có và không có `per_page`) và chạy

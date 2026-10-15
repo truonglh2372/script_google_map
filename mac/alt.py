@@ -11,7 +11,8 @@ round) -> when none left sleep 10 min and list again.
 Stop: <root>/STOP_ALL (clean exit at a place boundary). Google limit -> honours fetch_backoff.txt like before.
 Config by env or defaults: AQD_ROOT (dir of this file), AQD_ID_SUFFIXES, AQD_PARITY (even|odd),
 AQD_LIST_MAX_PAGES (default 20; 0 or empty lists the whole list before the first fetch, the old behaviour),
-AQD_FETCH_LIMIT (default 0 = every listed draft this round)."""
+AQD_FETCH_LIMIT (default 0 = every listed draft this round), AQD_CDP_PORT (default 9222; a missing env falls
+back to aqd_config.json, which mac/install.sh writes)."""
 import json, os, subprocess, sys, time
 R = (os.environ.get("AQD_ROOT") or os.path.dirname(os.path.abspath(__file__))).replace("\\", "/")
 PARITY = os.environ.get("AQD_PARITY") or ("even" if os.name == "nt" else "odd")
@@ -97,8 +98,21 @@ def write_json(path, data):
     with open(path + ".tmp", "w", encoding="utf-8") as f: json.dump(data, f, ensure_ascii=False)
     os.replace(path + ".tmp", path)
 
+
+def config_value(key):
+    """mac/install.sh writes aqd_config.json next to alt.py; the process env wins, this is the fallback so a
+    manual run (launchd env missing) still uses the configured CDP port / list pages / fetch limit."""
+    v = read_json(R + "/aqd_config.json", {}).get(key)
+    return None if v is None or v == "" else str(v)
+
+
+for _env, _key in (("AQD_CDP_PORT", "cdp_port"), ("AQD_LIST_MAX_PAGES", "list_max_pages"),
+                   ("AQD_FETCH_LIMIT", "fetch_limit")):
+    _v = config_value(_key)
+    if _v is not None and not os.environ.get(_env): os.environ[_env] = _v
+
 CREDS = R + "/creds.env"
-if not os.path.exists(CREDS): fail(f"missing {CREDS} (run mac/install_mac.sh first)")
+if not os.path.exists(CREDS): fail(f"missing {CREDS} (run mac/install.sh first)")
 for l in open(CREDS, encoding="utf-8"):
     l = l.strip()
     if l and not l.startswith("#") and "=" in l:
