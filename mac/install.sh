@@ -897,7 +897,15 @@ launchd_bootstrap() {
   local plist="$HOME/Library/LaunchAgents/$label.plist"
   [ -f "$plist" ] || { warn "no $plist to bootstrap"; return; }
   if act "launchctl bootstrap gui/$(id -u) $plist"; then
-    launchctl bootstrap "gui/$(id -u)" "$plist" 2>/dev/null || launchctl load -w "$plist" 2>/dev/null || warn "launchctl bootstrap failed for $label"
+    local i=0
+    # bootout is asynchronous: bootstrapping right after it can silently lose the job, so verify and retry
+    while [ "$i" -lt 10 ]; do
+      launchctl bootstrap "gui/$(id -u)" "$plist" 2>/dev/null || launchctl load -w "$plist" 2>/dev/null || true
+      sleep 1
+      if launchctl list "$label" >/dev/null 2>&1; then ok "launchd $label loaded"; return; fi
+      sleep 2; i=$((i + 1))
+    done
+    warn "launchctl bootstrap failed for $label (not loaded after 10 tries)"
   fi
 }
 

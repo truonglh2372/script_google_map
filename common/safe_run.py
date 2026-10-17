@@ -73,7 +73,14 @@ def browser_place_json(pid):
     if "pg" not in _PW:
         from playwright.sync_api import sync_playwright
         _PW["p"] = sync_playwright().start()
-        b = _PW["p"].chromium.connect_over_cdp(_CDP)
+        try:
+            b = _PW["p"].chromium.connect_over_cdp(_CDP)
+        except Exception:
+            # stop the driver, otherwise every later call fails with "Sync API inside the asyncio loop"
+            # (seen on the Mac for 2 days after Chrome's CDP went down once)
+            try: _PW.pop("p").stop()
+            except Exception: pass
+            raise
         ctx = b.contexts[0]; pg = ctx.pages[0] if ctx.pages else ctx.new_page()
         if "google.com/maps" not in pg.url:
             pg.goto("https://www.google.com/maps?hl=vi"); pg.wait_for_timeout(3000)
