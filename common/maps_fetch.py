@@ -125,6 +125,104 @@ def hours_text(p):
     return "; ".join((a if a == b else f"{a}–{b}") + ": " + v for a, b, v in groups)
 
 
+# ---- extras (2026-10-17): Google rating/reviews sample, weekly opening periods, About attributes ----
+REVIEW_CAP = 20
+_WD = {"Thứ Hai": 1, "Thứ Ba": 2, "Thứ Tư": 3, "Thứ Năm": 4, "Thứ Sáu": 5, "Thứ Bảy": 6, "Chủ Nhật": 7}
+
+
+def _hm(x):
+    if not isinstance(x, list) or not x or not isinstance(x[0], int):
+        return None
+    h, m = x[0], (x[1] if len(x) > 1 and isinstance(x[1], int) else 0)
+    return f"{h % 24:02d}:{m:02d}"
+
+
+def opening_periods(p):
+    """[{weekday 1=Mon..7=Sun, opens_at 'HH:MM', closes_at 'HH:MM'|None}] + per-day text.
+    24h -> opens 00:00, closes None (server: open until end of day). Closed day -> no period. Split shifts -> 2 rows."""
+    periods, by_day, ok = [], {}, False
+    for d in g(p, 203, 0) or []:
+        name = g(d, 0); wd = g(d, 1) if isinstance(g(d, 1), int) else _WD.get(name)
+        if not isinstance(wd, int) or not 1 <= wd <= 7:
+            continue
+        slots = g(d, 3) or []
+        texts = [s[0] for s in slots if isinstance(g(s, 0), str)]
+        by_day[wd] = ", ".join(texts) or "Đóng cửa"; ok = True
+        for s in slots:
+            t = g(s, 0) or ""
+            if "cả ngày" in t or "24 giờ" in t:
+                periods.append({"weekday": wd, "opens_at": "00:00", "closes_at": None}); continue
+            o, c = _hm(g(s, 1, 0)), _hm(g(s, 1, 1))
+            if o is None:
+                continue
+            if c == o:  # "00:00–24:00"
+                c = None
+            periods.append({"weekday": wd, "opens_at": o, "closes_at": c})
+    periods.sort(key=lambda r: (r["weekday"], r["opens_at"]))
+    return (periods if ok else None), {str(k): v for k, v in sorted(by_day.items())}
+
+
+def _ts(us):
+    try:
+        return time.strftime("%Y-%m-%dT%H:%M:%S+07:00", time.gmtime(int(us) / 1e6 + 7 * 3600))
+    except (TypeError, ValueError):
+        return None
+
+
+def reviews(p, cap=REVIEW_CAP):
+    """Reviews embedded in the place preview (no extra request). Author display name only (no profile id/url/avatar)."""
+    out = []
+    for r in g(p, 175, 9, 0, 0) or []:
+        n = g(r, 0)
+        if not isinstance(n, list):
+            continue
+        meta, body = g(n, 1) or [], g(n, 2) or []
+        rating = g(body, 0, 0)
+        text = g(body, 15, 0, 0)
+        photos = []
+        for ph in g(body, 2) or []:
+            u = g(ph, 1, 6, 0)
+            if isinstance(u, str) and "googleusercontent.com" in u:
+                photos.append(_base(u))
+        out.append({"id": g(n, 0), "author": g(meta, 4, 5, 0), "rating": rating if isinstance(rating, int) else None,
+                    "text": text if isinstance(text, str) else "", "published_at": _ts(g(meta, 2)),
+                    "relative_date": g(meta, 6), "language": g(body, 14, 0), "photo_urls": photos})
+        if len(out) >= cap:
+            break
+    out.sort(key=lambda x: x.get("published_at") or "", reverse=True)
+    return out
+
+
+def about(p):
+    """About tab: [{group, label, items:[{id, label, value(bool)}]}]."""
+    groups = []
+    for grp in g(p, 100, 1) or []:
+        items = []
+        for it in g(grp, 2) or []:
+            flag = g(it, 2, 0)
+            items.append({"id": (g(it, 0) or "").rsplit("/", 1)[-1], "label": g(it, 1),
+                          "value": bool(flag == 1), "text": g(it, 2, 2, 3) or g(it, 1)})
+        if items:
+            groups.append({"group": g(grp, 0), "label": g(grp, 1), "items": items})
+    return groups
+
+
+def description(p):
+    for path in ((32, 1, 1), (32, 0, 1), (154, 0, 0)):
+        v = g(p, *path)
+        if isinstance(v, str) and len(v) > 10:
+            return v.strip()
+    return ""
+
+
+def extras(p):
+    periods, by_day = opening_periods(p)
+    return {"google_rating": g(p, 4, 7), "google_review_count": g(p, 4, 8),
+            "rating_histogram": dict(zip(["1", "2", "3", "4", "5"], g(p, 175, 3) or [])) or None,
+            "reviews": reviews(p), "opening_periods": periods, "hours_by_weekday": by_day,
+            "about": about(p), "description": description(p)}
+
+
 def category(types, label):
     t = " ".join(types).lower()
     if any(x in types for x in CAFE) or "cà phê" in (label or "").lower():
@@ -187,6 +285,10 @@ def parse(p, place_id):
                   # seen after ~35-40 places in ~15 min from this IP. Treat as "retry later", not as data.
                   "thin": g(p, 76) is None and g(p, 171) is None},
     }
+    try:
+        info["_meta"]["extra"] = extras(p)
+    except Exception as e:  # noqa: BLE001
+        info["_meta"]["extra"] = {"error": f"{type(e).__name__}: {e}"}
     # an address-only "name" (e.g. "62 Nguyễn Đình Chiểu") is flagged, not fixed
     if re.match(r"^\d", name) and name.split(",")[0] == street:
         info["_meta"]["name_is_address"] = True

@@ -6,6 +6,37 @@
 - `mac/` — Mac mini: `install.sh` (**cài 1 lệnh**, tương đương `windows/install.ps1`), `alt.py`, và launchd plist **mẫu** (`aqd.alt`, `aqd.chrome`, `aqd.menu`) trong `mac/launchd/`; `install.sh` thay `__AQD_*__` theo root rồi ghi vào `~/Library/LaunchAgents/`. `install_mac.sh` **đã bị thay thế** (xem đầu file).
 - `tools/` — `cleanup.py` (sửa/ẩn món sai đã ghi), `build_vocab.py`, các patch.
 
+## ⚡ Cài / cập nhật bằng 1 lệnh, không hỏi gì (dùng cho máy đang chạy)
+
+**Windows (Admin)**, dán vào PowerShell:
+```powershell
+$env:AQD_YES=1; irm https://raw.githubusercontent.com/truonglh2372/script_google_map/main/windows/install.ps1 | iex
+```
+**Mac mini**, dán vào Terminal:
+```bash
+curl -fsSL https://raw.githubusercontent.com/truonglh2372/script_google_map/main/mac/install.sh | AQD_YES=1 bash
+```
+Khi có `AQD_YES=1`, installer chạy hết **không hỏi gì**:
+- Tải code mới nhất từ repo về.
+- **Dừng sạch** fetcher và menu worker của root này: tạo `STOP_ALL`, chờ tối đa 10 phút để chúng dừng ở ranh giới giữa 2 quán. Quá 10 phút mới kill; done marker vẫn giữ tiến độ.
+- Cài dependency, gồm cả CLIP và easyocr. Gói nào đã có thì pip bỏ qua.
+- **Giữ nguyên** `creds.env`, `chrome-profile/`, `aqd_data/` (mọi `SAFE_DONE` / `MENU_DONE`) và cách chia ID đã lưu trong `aqd_config.json`. Nếu chưa lưu cách chia nào thì Windows lấy ID **chẵn**, Mac lấy ID **lẻ**.
+- Đăng ký tự chạy khi đăng nhập: Startup folder trên Windows, launchd `aqd.chrome` / `aqd.alt` / `aqd.menu` trên Mac.
+- Xoá `STOP_ALL` rồi **bật lại** cả fetcher (`alt.py`) lẫn menu worker.
+
+Muốn đổi giá trị thì đặt biến môi trường cùng tên trước lệnh, ví dụ `AQD_ID_SUFFIXES="1 3"`, `AQD_PARITY=odd`, `AQD_ADMIN_EMAIL=...` hoặc `AQD_ADMIN_PASSWORD=...` (dùng khi máy mới chưa có `creds.env`). Bỏ `AQD_YES` thì installer quay về chế độ hỏi từng câu như mô tả bên dưới. Lưu ý: GitHub raw có thể trễ tới khoảng 5 phút sau khi push.
+
+## Dữ liệu Google thêm (từ 17/10/2026)
+Khi fetch một quán, `maps_fetch.py` lấy thêm các dữ liệu dưới đây, **không tốn thêm request nào tới Google** (đọc ngay từ JSON preview vốn đã tải):
+- **Đánh giá:** `google_rating`, `google_review_count`, phân bố 1–5 sao, và tối đa **20** đánh giá có sẵn trong preview. Mỗi đánh giá gồm tên hiển thị của người viết (chỉ tên, không lưu id hay avatar), số sao, nội dung, ngày đăng và ảnh kèm theo. Ảnh chỉ được giữ khi CLIP xếp là `food` / `drink`, tối đa 12 ảnh mỗi quán (`AQD_REVIEW_PHOTO_CAP`) và chỉ lưu URL.
+- **Giờ mở cửa theo từng ngày:** `opening_periods` dạng `{weekday 1=T2..7=CN, opens_at, closes_at}`. Hỗ trợ ca gãy (2 dòng một ngày), ngày nghỉ (không có dòng nào) và mở 24 giờ (`00:00` với `closes_at=null`).
+- **Giới thiệu (About):** các nhóm thuộc tính (dịch vụ, đỗ xe, thanh toán, tiện nghi, hỗ trợ người khuyết tật…) và mô tả quán.
+
+Dữ liệu được ghi đi đâu:
+- Server: chỉ **giờ mở cửa**, qua `PUT /api/v1/admin/restaurants/:id/opening_periods`, và **chỉ khi quán chưa có giờ nào**. Giờ do chủ quán hay admin đã nhập không bao giờ bị ghi đè. `opening_hours_text` vẫn được ghi như cũ.
+- Máy local: mọi thứ (cả phần server chưa có chỗ chứa) nằm ở `aqd_data/<id>/extra.json`. Hai issue cho phần server còn thiếu: truonglh2372/an_uong_quanh_day#680 (đánh giá) và #679 (About + description).
+- `tools/extra_backfill.py [--dry] id...` chạy lại phần này cho những quán đã fetch trước đó.
+
 ## Cài trên máy Windows mới — 1 lệnh duy nhất
 
 Dán **một dòng** vào PowerShell (repo public, không cần token):

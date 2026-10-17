@@ -182,7 +182,10 @@ read_secret_to_var() {
 }
 
 ask() {
-  local q="$1" def="$2" req="${3:-}" p
+  local q="$1" def="$2" req="${3:-}" p envv=""
+  if [ "$YES" = 1 ]; then case "$q" in [A-Z_]*) envv="$(printenv "$q" 2>/dev/null || true)" ;; esac; fi
+  if [ -n "$envv" ]; then note "$q = $envv (from env)"; ANS="$envv"; return; fi
+  if [ "$YES" = 1 ] && [ -n "$def" ]; then note "$q -> $def (--yes default)"; ANS="$def"; return; fi
   if [ -n "$def" ]; then p="$q [$def]"
   elif [ "$req" = required ]; then p="$q (REQUIRED - no default)"
   else p="$q"; fi
@@ -191,7 +194,9 @@ ask() {
 }
 
 ask_secret() {
-  local q="$1" def="$2" p
+  local q="$1" def="$2" p envv
+  envv=""; if [ "$YES" = 1 ]; then envv="$(printenv "${q%% *}" 2>/dev/null || true)"; fi
+  if [ -n "$envv" ]; then note "${q%% *} taken from env (not printed)"; ANS="$envv"; return; fi
   if [ -n "$def" ]; then p="$q [Enter = keep the existing value]"; else p="$q (REQUIRED - no default)"; fi
   read_secret_to_var "$p"
   if [ -z "$ANS" ] && [ -n "$def" ]; then ANS="$def"; fi
@@ -534,7 +539,7 @@ pre_install_patch_check() {
       note "  repo     : mac/alt.py   sha256=$sum_repo lines=$lines_repo"
       note "  this Mac's copy is kept at $BACKUP_DIR/preinstall_py/alt.py"
       note "  see what differs before deciding:  diff -u $BACKUP_DIR/preinstall_py/alt.py $R/alt.py"
-      if ! confirm "Overwrite this Mac's alt.py with the repo version?" no; then
+      if ! confirm "Overwrite this Mac's alt.py with the repo version?" "$(if [ "$YES" = 1 ]; then printf yes; else printf no; fi)"; then
         bad "stopped on purpose: this Mac's alt.py was NOT overwritten."
         note "backup of the current alt.py: $BACKUP_DIR/preinstall_py/alt.py"
         note "merge anything you need from it into the repo, then run the same single command again."
@@ -553,12 +558,54 @@ pre_install_patch_check() {
   done
 }
 
+config_json_value() {
+  local f="$R/aqd_config.json"
+  [ -f "$f" ] || return 0
+  sed -n "s/.*\"$1\"[[:space:]]*:[[:space:]]*\"\{0,1\}\([^\",}]*\)\"\{0,1\}.*/\1/p" "$f" | head -1
+}
+
+root_procs_loose() {
+  # this root's alt/safe_run/menu_worker + a menu_worker started with a relative path or from an old python
+  { aqd_procs_in_root "$R"; list_aqd_procs | while IFS="$(printf '\t')" read -r pid cmd; do
+      case "$cmd" in *"$R"/menu_worker.py*|*" menu_worker.py"*) printf '%s\t%s\n' "$pid" "$cmd" ;; esac
+    done; } | sort -u
+}
+
+stop_graceful() {
+  local left i=0 n
+  left="$(root_procs_loose)"
+  if [ -z "$left" ]; then note "nothing running under $R"; return; fi
+  print_proc_list "$left"
+  touch_f "$R/STOP_ALL"
+  ok "created STOP_ALL - waiting up to 10 min for alt.py/safe_run.py/menu_worker.py to stop at a place boundary"
+  if [ "$DRY_RUN" = 1 ]; then return; fi
+  while [ "$i" -lt 600 ]; do
+    [ -z "$(root_procs_loose)" ] && { ok "stopped cleanly after ~${i}s"; break; }
+    sleep 5; i=$((i + 5))
+  done
+  for n in aqd.alt aqd.menu; do launchctl bootout "gui/$(id -u)/$n" 2>/dev/null || launchctl remove "$n" 2>/dev/null || true; done
+  left="$(root_procs_loose)"
+  if [ -n "$left" ]; then
+    warn "still running after 10 min - stopping them (done markers keep progress)"
+    printf '%s\n' "$left" | while IFS="$(printf '\t')" read -r p cmd; do [ -n "$p" ] && kill_pid "$p"; done
+  fi
+}
+
 ask_suffixes() {
   say ""
   note "ID suffixes = the LAST DIGIT of the id this machine handles; keep the set DISJOINT from every other machine."
   note "Examples: '1 3 5 7' or '2 4'. Also accepts 'even' or 'odd' to fall back to the old AQD_PARITY (the Mac default is odd)."
   note "This one is REQUIRED: there is no safe default, because two machines on the same digits duplicate the work."
-  local raw out bad p
+  local raw out bad p saved
+  if [ "$YES" = 1 ] && [ -z "${AQD_ID_SUFFIXES:-}" ]; then
+    saved="$(config_json_value id_suffixes)"
+    if [ -n "$saved" ]; then note "AQD_ID_SUFFIXES = $saved (saved aqd_config.json)"; SUFFIXES_OUT="$saved"; PARITY_OUT=""; return; fi
+    saved="$(config_json_value parity)"
+    if [ -n "$saved" ]; then note "AQD_PARITY = $saved (saved aqd_config.json)"; SUFFIXES_OUT=""; PARITY_OUT="$saved"; return; fi
+    PARITY_OUT="${AQD_PARITY:-odd}"; SUFFIXES_OUT=""
+    note "--yes and no saved split: AQD_PARITY = $PARITY_OUT (Mac default odd; Windows default even)"
+    return
+  fi
   while :; do
     ask "AQD_ID_SUFFIXES" "" required
     raw="$(printf '%s' "$ANS" | tr ',' ' ' | tr -s ' ' ' ' | sed -e 's/^ *//' -e 's/ *$//')"
@@ -857,7 +904,7 @@ startup_install() {
   local labels="" l
   write_plists
   if [ "$NO_CHROME" = 0 ]; then labels="$labels aqd.chrome"; fi
-  if [ "$NO_START" = 0 ]; then labels="$labels aqd.alt"; fi
+  if [ "$NO_START" = 0 ]; then labels="$labels aqd.alt aqd.menu"; fi
   if ! launchd_command; then
     warn "launchctl not found - the plists were written but not loaded; load them yourself or run alt.py by hand"
     return
@@ -969,7 +1016,7 @@ install_deps() {
     "CLIP|torch open_clip_torch|156|filters the photo gallery: keeps food/drink/menu photos, drops the rest" \
     "OCR|easyocr|242|reads menu photos and shop signs (adds about 124 MB once CLIP is in: torch is shared)"; do
     IFS='|' read -r gname gpkgs gmb gwhat <<<"$gspec"
-    if ! confirm "Install $gname? ~$gmb MB, 5-20 min. $gwhat" no; then
+    if ! confirm "Install $gname? ~$gmb MB, 5-20 min. $gwhat" "$(if [ "$YES" = 1 ]; then printf yes; else printf no; fi)"; then
       note "skipped $gname (Enter = default no)"
       continue
     fi
@@ -1062,7 +1109,7 @@ main() {
     fi
   else
     hdr "2/8 Stop old processes"
-    if [ "$CLEAN" = 1 ]; then note "skipped: $R does not exist yet"; else note "skipped: update mode"; fi
+    if [ "$CLEAN" = 0 ] && [ "$existed" = 1 ]; then stop_graceful; else note "skipped: $R does not exist yet"; fi
     hdr "3/8 Report before wiping"
     note "skipped"
     hdr "4/8 Rescue backup"
@@ -1101,6 +1148,7 @@ main() {
   hdr "8/8 Chrome + start"
   CHROME_BIN="$(find_chrome)"
   if [ "$NO_CHROME" = 1 ]; then warn "Chrome skipped (--no-chrome); the CDP port for this root is $CDP_PORT_OUT"; fi
+  for f in STOP_ALL STOP; do if [ -e "$R/$f" ]; then rm_f "$R/$f"; ok "removed $f"; fi; done
   if confirm "Register auto-start at macOS login (launchd)?" "$(if [ "$R" = "$HOME/aqd" ]; then printf yes; else printf no; fi)"; then use_launchd=1; fi
   if [ "$use_launchd" = 1 ]; then
     startup_install
@@ -1115,6 +1163,10 @@ main() {
       warn "REMEMBER: log in to Google in that Chrome window (the script cannot do it)"
     fi
     start_alt
+    if [ "$NO_START" = 0 ] && [ -f "$R/menu_worker.py" ]; then
+      if act "start menu_worker.py"; then (cd "$R" && nohup env AQD_ROOT="$R" "$PY" "$R/menu_worker.py" >"$R/menu_worker.out" 2>&1 &); fi
+      done_ok "started menu_worker.py (log: $R/menu_worker_log.md)"
+    fi
   fi
 
   say ""

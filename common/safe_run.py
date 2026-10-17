@@ -142,6 +142,9 @@ def build_info(row):
         except Exception as e:
             print(f"browser fallback failed: {e}", flush=True)
     meta = info.pop("_meta"); photos = info.pop("photo_urls")
+    extra = meta.pop("extra", None) or {}
+    _review_photo_filter(extra)
+    info["_extra"] = extra
     types = [t for t in (info.get("google_types_text") or "").split(", ") if t not in ("point_of_interest", "establishment")]
     info["_name_is_address"] = bool(meta.get("name_is_address"))
     cat, cuisine, reason = classify(info, types)
@@ -224,7 +227,49 @@ def cmd_prep(args):
     log(f"PREP END prepared {done}")
 
 
-SKIP_KEYS = ("_sv", "cover", "logo", "stay_draft", "stay_reason", "note", "photo_urls", "has_menu_photos", "_maps")
+SKIP_KEYS = ("_extra", "_sv", "cover", "logo", "stay_draft", "stay_reason", "note", "photo_urls", "has_menu_photos", "_maps")
+
+
+REVIEW_PHOTO_CAP = int(os.environ.get("AQD_REVIEW_PHOTO_CAP", "12"))
+
+
+def _review_photo_filter(extra):
+    """Keep only review photos CLIP calls food/drink (cap total); nothing is uploaded, only stored in extra.json."""
+    n = 0
+    for rv in extra.get("reviews") or []:
+        keep = []
+        for u in rv.pop("photo_urls", []) or []:
+            if n >= REVIEW_PHOTO_CAP: break
+            n += 1
+            lab = None
+            if PF is not None and os.environ.get("AQD_CLIP", "1") not in ("0", "false", "no"):
+                try:
+                    res = PF.classify_url(u + "=s512"); lab = res.get("label")
+                except Exception:
+                    lab = None
+            if lab in ("food", "drink"): keep.append({"url": u, "label": lab})
+        rv["photos"] = keep
+
+
+def push_extra(G, rid, folder, info, rec, save):
+    """extra.json locally (always) + opening periods via PUT only when the server has none. Returns log part."""
+    ex = dict(info.get("_extra") or {}); ex["saved_at"] = time.strftime("%F %T")
+    json.dump(ex, open(os.path.join(folder, "extra.json"), "w", encoding="utf-8"), ensure_ascii=False, indent=1)
+    per = ex.get("opening_periods")
+    if not per or rec.get("periods"):
+        return f"extra(r={ex.get('google_rating')},rv={len(ex.get('reviews') or [])},about={sum(len(x['items']) for x in ex.get('about') or [])})"
+    try:
+        cur = G.req("GET", f"{API}/{rid}/opening_periods").get("periods") or []
+        if cur:
+            rec["periods"] = "server_has"; save(); return "periods=kept_server"
+        G.req("PUT", f"{API}/{rid}/opening_periods", json_body={"periods": per}, raw_status=(422,))
+        got = G.req("GET", f"{API}/{rid}/opening_periods").get("periods") or []
+        rec["periods"] = len(got); save()
+        return f"periods={len(got)}/{len(per)}"
+    except Overload:
+        raise
+    except Exception as e:
+        return f"periods_failed:{type(e).__name__}"
 
 
 def push_one(G, rid):
@@ -244,6 +289,7 @@ def push_one(G, rid):
     after = G.req("PATCH", f"{API}/{rid}", json_body=fields)["restaurant"]
     rec["info"] = {"at": time.strftime("%F %T"), "sent": len(fields)}; save()
     parts.append(f"info={len(fields)}f")
+    parts.append(push_extra(G, rid, folder, info, rec, save))
     # 2) photos, chunks of <=5, sequential
     items = info.get("photo_urls") or []
     todo = [it for it in items if _url_hash(it["url"]) not in rec["urls"]]

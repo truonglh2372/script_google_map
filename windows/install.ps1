@@ -41,6 +41,10 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+# One-command non-interactive mode: AQD_YES=1 (or -Yes). Every prompt then takes, in order: the env var of the
+# same name (AQD_ID_SUFFIXES, AQD_ADMIN_EMAIL, ...), the value already saved in aqd_config.json / creds.env, or
+# the default. Running processes of this root are stopped at a place boundary first and restarted at the end.
+if (-not $Yes -and $env:AQD_YES -and $env:AQD_YES -notmatch '^(?i)(0|false|no|off)$') { $Yes = [switch]$true }
 $ProgressPreference = 'SilentlyContinue'
 $DefaultRoot = 'C:\aqd'
 $DefaultBase = 'https://anuongquanhday.com'
@@ -155,6 +159,9 @@ function Nat([string]$Exe, [object[]]$ArgList, [string]$LogPath = '', [switch]$S
 }
 
 function Ask([string]$Question, [string]$Default = '', [switch]$Required) {
+  $fromEnv = if ($Yes) { [Environment]::GetEnvironmentVariable($Question) } else { $null }
+  if ($fromEnv) { Note "$Question = $fromEnv (from env)"; return $fromEnv }
+  if ($Yes -and $Default) { Note "$Question -> $Default (-Yes default)"; return $Default }
   if ($Default) { $p = "$Question [$Default]" }
   elseif ($Required) { $p = "$Question (REQUIRED - no default)" }
   else { $p = $Question }
@@ -164,6 +171,8 @@ function Ask([string]$Question, [string]$Default = '', [switch]$Required) {
 }
 
 function AskSecret([string]$Question, [string]$Default = '') {
+  $fromEnv = if ($Yes) { [Environment]::GetEnvironmentVariable(($Question -split ' ')[0]) } else { $null }
+  if ($fromEnv) { Note "$(($Question -split ' ')[0]) taken from env (not printed)"; return $fromEnv }
   if ($Default) { $p = "$Question [Enter = keep the existing value]" } else { $p = "$Question (REQUIRED - no default)" }
   if (Test-StdinRedirected) {
     Say $p
@@ -449,6 +458,31 @@ function Stop-Old([string]$NewRoot) {
   }
 }
 
+function Get-RootAqdProcsLoose([string]$NewRoot) {
+  # processes of this root + a menu_worker started with a relative path (cwd = root, e.g. 'python menu_worker.py')
+  $all = Get-AllAqdProcs
+  $mine = @(Select-AqdProcsInRoot $all $NewRoot)
+  $rel = @($all | Where-Object { $_.CommandLine -match '(^|[\s"])menu_worker\.py' -and $_.CommandLine -notmatch '[\\/]menu_worker\.py' })
+  return @($mine + $rel | Sort-Object ProcessId -Unique)
+}
+
+function Stop-Graceful([string]$NewRoot, [int]$WaitSec = 600) {
+  $procs = @(Get-RootAqdProcsLoose $NewRoot)
+  if ($procs.Count -eq 0) { Note "nothing running under $NewRoot"; return $false }
+  foreach ($x in $procs) { Note "running: pid=$($x.ProcessId) $($x.CommandLine)" }
+  New-Item -ItemType File -Force -Path (Join-Path $NewRoot 'STOP_ALL') | Out-Null
+  Ok "created STOP_ALL - waiting up to $([int]($WaitSec/60)) min for alt.py/safe_run.py/menu_worker.py to stop at a place boundary"
+  for ($i = 0; $i -lt $WaitSec; $i += 5) {
+    if (@(Get-RootAqdProcsLoose $NewRoot).Count -eq 0) { Ok "stopped cleanly after ~$($i)s"; return $true }
+    Start-Sleep 5
+  }
+  $left = @(Get-RootAqdProcsLoose $NewRoot)
+  Warn "$($left.Count) process(es) still running after $WaitSec s - stopping them (done markers keep progress)"
+  foreach ($x in $left) { Stop-Process -Id $x.ProcessId -Force -ErrorAction SilentlyContinue }
+  Start-Sleep 2
+  return $true
+}
+
 function Clear-State([string]$NewRoot, [bool]$RemoveProfile) {
   foreach ($f in @('STOP_ALL', 'STOP', 'STOP_MENU', 'parity_tries.json', 'fetch_backoff.txt', 'alt.out',
       'safe_run_log.md', 'aqd_progress.md', 'aqd_api_log.md', 'start_fetcher.log', 'menu_worker.lock', 'photos_backoff.txt')) {
@@ -560,6 +594,16 @@ function Ask-Suffixes {
   Note "ID suffixes = the LAST DIGIT of the id this machine handles; keep the set DISJOINT from every other machine."
   Note "Examples: '1 3 5 7' or '2 4'. Also accepts 'even' or 'odd' to fall back to the old AQD_PARITY (the Mac default is odd)."
   Note "This one is REQUIRED: there is no safe default, because two machines on the same digits duplicate the work."
+  if ($Yes -and -not $env:AQD_ID_SUFFIXES) {
+    $saved = $null
+    $cp = Join-Path $script:InstallRoot 'aqd_config.json'
+    if (Test-Path $cp) { try { $saved = Get-Content $cp -Raw | ConvertFrom-Json } catch { $saved = $null } }
+    if ($saved -and $saved.id_suffixes) { Note "AQD_ID_SUFFIXES = $($saved.id_suffixes) (saved aqd_config.json)"; return @{ suffixes = [string]$saved.id_suffixes; parity = '' } }
+    if ($saved -and $saved.parity) { Note "AQD_PARITY = $($saved.parity) (saved aqd_config.json)"; return @{ suffixes = ''; parity = [string]$saved.parity } }
+    $pp = if ($env:AQD_PARITY) { $env:AQD_PARITY } else { 'even' }
+    Note "-Yes and no saved split: AQD_PARITY = $pp (Windows default even; Mac default odd)"
+    return @{ suffixes = ''; parity = $pp }
+  }
   while ($true) {
     $raw = ([string](Ask 'AQD_ID_SUFFIXES' '' -Required)).Replace(',', ' ').Trim()
     if ($raw -match '^(?i)even$') { return @{ suffixes = ''; parity = 'even' } }
@@ -631,6 +675,7 @@ function Invoke-Install {
     }
 
     $existed = Test-Path $newRoot
+    $script:InstallRoot = $newRoot
     if (-not $existed) { New-Item -ItemType Directory -Force -Path $newRoot | Out-Null; Ok "created $newRoot" }
 
     $backup = $null
@@ -653,7 +698,8 @@ function Invoke-Install {
       Clear-State $newRoot $rmProfile
     } else {
       Head "2/8 Stop old processes"
-      Note $(if ($clean) { "skipped: $newRoot does not exist yet" } else { "skipped: update mode" })
+      if ($existed -and -not $clean) { $null = Stop-Graceful $newRoot }
+      else { Note "skipped: $newRoot does not exist yet" }
       Head "3/8 Report before wiping"
       Note "skipped"
       Head "4/8 Rescue backup"
@@ -717,7 +763,7 @@ function Invoke-Install {
       Note "CLIP is about 156 MB (torch + open_clip_torch); OCR is about 242 MB (~124 MB more once CLIP is in)."
       Note "Both default to NO: press Enter to skip. Go get a coffee if you do install one - this window prints progress and a 'still running' line every 15s. Do NOT close it."
       foreach ($g in $groups) {
-        if (-not (Confirm "Install $($g.name)? ~$($g.mb) MB, 5-20 min. $($g.what)" $false)) { Note "skipped $($g.name) (Enter = default no)"; continue }
+        if (-not (Confirm "Install $($g.name)? ~$($g.mb) MB, 5-20 min. $($g.what)" ([bool]$Yes))) { Note "skipped $($g.name) (Enter = default no)"; continue }
         $gLog = Join-Path $newRoot "pip-heavy-$($g.pkgs[0]).log"
         $rg = Nat $py ($pipArgs + $g.pkgs) $gLog -Stream -Label "pip $($g.name)"
         if ($rg.rc -eq 0) { Ok "$($g.name) installed in $(Fmt-Secs $rg.secs)" }
@@ -745,8 +791,11 @@ function Invoke-Install {
       }
     } else { Note "no Startup entry" }
 
+    foreach ($sf in @('STOP_ALL', 'STOP')) { $sp = Join-Path $newRoot $sf; if (Test-Path $sp) { Remove-Item -Force $sp; Ok "removed $sf" } }
     if ($NoStart.IsPresent) { Warn "alt.py not started (-NoStart)" }
     else {
+      $mw = Join-Path $newRoot 'start_menu_worker.ps1'
+      if (Test-Path $mw) { & powershell -NoProfile -ExecutionPolicy Bypass -File $mw; Ok "menu worker started (start_menu_worker.ps1; log: $newRoot\menu_worker_log.md)" }
       if (@(Get-AqdProcs $newRoot).Count -gt 0) { Warn "alt.py/safe_run.py for $newRoot already running - not starting another" }
       else {
         Start-Process -WindowStyle Hidden -FilePath $py -ArgumentList (Join-Path $newRoot 'alt.py') -WorkingDirectory $newRoot
