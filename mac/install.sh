@@ -426,6 +426,7 @@ find_python() {
       3.10.*) rank=2 ;;
       3.13.*) rank=3 ;;
       3.14.*) rank=4 ;;
+      3.9.*) rank=5; warn "python $v at $path is older than 3.10 - accepted as a last resort (macOS system python; the payload parses on 3.9)" ;;
     esac
     if [ "$rank" = 9 ]; then
       warn "ignoring $path ($v): this payload needs Python 3.10 or newer"
