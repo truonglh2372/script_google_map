@@ -74,7 +74,7 @@ def browser_place_json(pid):
         from playwright.sync_api import sync_playwright
         _PW["p"] = sync_playwright().start()
         try:
-            b = _PW["p"].chromium.connect_over_cdp(_CDP)
+            b = _PW["p"].chromium.connect_over_cdp(__import__("cdp_proxy").endpoint())
         except Exception:
             # stop the driver, otherwise every later call fails with "Sync API inside the asyncio loop"
             # (seen on the Mac for 2 days after Chrome's CDP went down once)

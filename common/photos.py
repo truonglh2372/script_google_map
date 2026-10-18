@@ -191,7 +191,7 @@ def main():
     if os.environ.get("PHOTOS_LIMIT"): ids = ids[:int(os.environ["PHOTOS_LIMIT"])]
     G = S.Guard(); hour = []
     with sync_playwright() as p:
-        br = p.chromium.connect_over_cdp("http://127.0.0.1:" + (os.environ.get("AQD_CDP_PORT") or "9222")); ctx = br.contexts[0]
+        br = p.chromium.connect_over_cdp(__import__("cdp_proxy").endpoint()); ctx = br.contexts[0]
         pg = ctx.pages[0] if ctx.pages else ctx.new_page()
         pg.goto("https://www.google.com/maps?hl=vi"); pg.wait_for_timeout(4000)
         if not signed_in(pg): log(f"NOT SIGNED IN in {R}/chrome-profile window; stop"); sys.exit(5)
