@@ -28,6 +28,46 @@ LIST_PAGE_MAX, LIST_META = 500, ".meta.json"
 STOPFILE = ROOT + "/STOP"
 
 
+
+def _img_body(chunk, roles=None):
+    """#704: image_urls items may be {url, role}; the server stores pending_role and sets cover/logo itself when the
+    async download finishes (PUT /cover on a still-pending photo answers 422 invalid_image). roles: {url: role}."""
+    roles = roles or {}
+    out, used = [], set()
+    for c in chunk:
+        r = roles.get(c["url"])
+        if r in ("cover", "logo") and r not in used:
+            used.add(r); out.append({"url": _upsize_google(c["url"]), "role": r})
+        else:
+            out.append(_upsize_google(c["url"]))
+    return {"image_urls": out}
+
+
+def _pick_roles(todo, rec, cover_key="role", logo_key="role2", want_cover=True, want_logo=True):
+    """Choose which new URL carries cover/logo (marked one first, else 1st/2nd new URL)."""
+    roles = {}
+    if want_cover and todo:
+        roles[next((c for c in todo if c.get(cover_key) == "cover"), todo[0])["url"]] = "cover"
+    if want_logo:
+        rest = [c for c in todo if c["url"] not in roles]
+        hit = next((c for c in rest if c.get(logo_key) == "logo"), rest[0] if rest else None)
+        if hit: roles[hit["url"]] = "logo"
+    return roles
+
+
+def _rec_photo(c, ph, roles):
+    d = {"url": c["url"], "photo_id": int(ph["id"]) if ph else None}
+    if ph:
+        d["status"] = ph.get("status") or "succeeded"
+        if ph.get("pending_role"): d["role"] = ph["pending_role"]
+        elif roles.get(c["url"]) and d["status"] == "pending": d["role"] = roles[c["url"]]
+    return d
+
+
+def _role_queued(rec, role):
+    """A pending photo already carries pending_role=role -> the server will assign it; no PUT."""
+    return next((v["photo_id"] for v in rec["urls"].values() if v.get("role") == role and v.get("photo_id")), None)
+
 def log(s):
     line = f"- {time.strftime('%Y-%m-%d %H:%M:%S')} {s}"
     open(LOG, "a", encoding="utf-8").write(line + "\n"); print(line, flush=True)
@@ -310,16 +350,17 @@ def push_one(G, rid):
     items = info.get("photo_urls") or []
     todo = [it for it in items if _url_hash(it["url"]) not in rec["urls"]]
     added = failed = 0
+    roles = _pick_roles(todo, rec, want_cover=not rec.get("cover"), want_logo=not rec.get("logo"))
     for i in range(0, len(todo), PHOTO_CHUNK):
         chunk = todo[i:i + PHOTO_CHUNK]
-        body = G.req("POST", f"{API}/{rid}/photos", json_body={"image_urls": [_upsize_google(c["url"]) for c in chunk]}, raw_status=(422,))
+        body = G.req("POST", f"{API}/{rid}/photos", json_body=_img_body(chunk, roles), raw_status=(422,))
         photos, errors = body.get("photos") or [], body.get("errors") or []
         bad = {e.get("url") for e in errors if isinstance(e, dict)}
         it = iter(photos)
         for c in chunk:
             if _upsize_google(c["url"]) in bad: failed += 1; continue
             p = next(it, None)
-            if p: rec["urls"][_url_hash(c["url"])] = {"url": c["url"], "photo_id": int(p["id"])}; added += 1
+            if p: rec["urls"][_url_hash(c["url"])] = _rec_photo(c, p, roles); added += 1
         save()
     parts.append(f"photos=+{added}" + (f"/fail{failed}" if failed else "") + f"/of{len(items)}")
     if not rec["urls"] and info.get("_sv") and not rec.get("streetview"):
@@ -344,8 +385,12 @@ def push_one(G, rid):
         if not hit:  # fallback: first/second uploaded
             up = [c for c in items if (rec["urls"].get(_url_hash(c["url"])) or {}).get("photo_id")]
             hit = (up[0] if role == "cover" else (up[1] if len(up) > 1 else (up[0] if up else None))) if up else None
+        q = _role_queued(rec, role)
+        if q and not rec.get(role):
+            rec[role] = q; save(); parts.append(f"{role}={q}(pending_role)"); continue
         if hit and rec.get(role) != rec["urls"][_url_hash(hit["url"])]["photo_id"]:
             pid = rec["urls"][_url_hash(hit["url"])]["photo_id"]
+            if (rec["urls"][_url_hash(hit["url"])] or {}).get("status") == "pending": continue
             G.req("PUT", f"{API}/{rid}/{role}", json_body={"photo_id": pid}); rec[role] = pid; save()
             parts.append(f"{role}={pid}")
     # 4) status
@@ -639,12 +684,12 @@ def cmd_backfill(args):
         try:
             for i in range(0, len(new), PHOTO_CHUNK):
                 chunk = new[i:i + PHOTO_CHUNK]
-                body = G.req("POST", f"{API}/{rid}/photos", json_body={"image_urls": [_upsize_google(c["url"]) for c in chunk]}, raw_status=(422,))
+                body = G.req("POST", f"{API}/{rid}/photos", json_body=_img_body(chunk), raw_status=(422,))
                 bad = {e.get("url") for e in body.get("errors") or [] if isinstance(e, dict)}; it_ = iter(body.get("photos") or [])
                 for c in chunk:
                     if _upsize_google(c["url"]) in bad: continue
                     ph = next(it_, None)
-                    if ph: rec["urls"][_url_hash(c["url"])] = {"url": c["url"], "photo_id": int(ph["id"])}; added += 1
+                    if ph: rec["urls"][_url_hash(c["url"])] = _rec_photo(c, ph, {}); added += 1
                 json.dump(rec, open(recp, "w", encoding="utf-8"), ensure_ascii=False, indent=1)
         except Overload as e:
             log(f"#{rid} BACKFILL OVERLOAD {e}; wait 5 min"); nap(COOLDOWN); continue
@@ -777,19 +822,26 @@ def cmd_refetch(args):
                     hs.append(h); keep.append(it)
                 todo = keep; parts.append(f"dup_skipped={dup}/srv{len(hs) - len(keep)}")
             added = failed = 0
+            roles = _pick_roles(todo, rec, cover_key="role", want_cover=(not rec.get("cover") or rec.get("cover") == rec.get("streetview")), want_logo=not rec.get("logo"))
             for i in range(0, len(todo), PHOTO_CHUNK):
                 chunk = todo[i:i + PHOTO_CHUNK]
-                body = G.req("POST", f"{API}/{rid}/photos", json_body={"image_urls": [_upsize_google(c["url"]) for c in chunk]}, raw_status=(422,))
+                body = G.req("POST", f"{API}/{rid}/photos", json_body=_img_body(chunk, roles), raw_status=(422,))
                 bad = {e.get("url") for e in body.get("errors") or [] if isinstance(e, dict)}; it_ = iter(body.get("photos") or [])
                 for c in chunk:
                     if _upsize_google(c["url"]) in bad: failed += 1; continue
                     ph = next(it_, None)
                     # queued (async) photos are recorded without an id so a later pass never re-posts them
-                    rec["urls"][_url_hash(c["url"])] = {"url": c["url"], "photo_id": int(ph["id"]) if ph else None}; added += 1
+                    rec["urls"][_url_hash(c["url"])] = _rec_photo(c, ph, roles); added += 1
                 save()
             parts.append(f"photos=+{added}" + (f"/fail{failed}" if failed else "") + f"/of{len(items)}")
             # cover: only replace the script's own streetview / missing cover; logo only if none set by the script
-            up = [c for c in items if (rec["urls"].get(_url_hash(c["url"])) or {}).get("photo_id")]
+            # #704: pending photos carry pending_role (server assigns on download); PUT only already-downloaded ones
+            for role in ("cover", "logo"):
+                q = _role_queued(rec, role)
+                if q and rec.get(role) in (None, rec.get("streetview")) and q != rec.get(role):
+                    rec[role] = q; save(); parts.append(f"{role}={q}(pending_role)")
+            up = [c for c in items if (rec["urls"].get(_url_hash(c["url"])) or {}).get("photo_id")
+                  and (rec["urls"].get(_url_hash(c["url"])) or {}).get("status", "succeeded") != "pending"]
             if up and (not rec.get("cover") or rec.get("cover") == rec.get("streetview")):
                 hit = next((c for c in up if c.get("role") == "cover"), up[0]); pid = rec["urls"][_url_hash(hit["url"])]["photo_id"]
                 G.req("PUT", f"{API}/{rid}/cover", json_body={"photo_id": pid}); rec["cover"] = pid; save(); parts.append(f"cover={pid}")

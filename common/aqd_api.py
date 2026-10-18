@@ -245,6 +245,7 @@ class AQD:
     def __init__(self, base=BASE, verbose=False):
         self.base = base
         self.verbose = verbose
+        self.pending_roles = {}   # photo_id -> pending_role for URL photos still downloading (#704)
         self.ua = "aqd-api/2.0 (+grok-bot)"
         self.tokens = TokenStore(base, self.ua)
         self._tl = threading.local()
@@ -432,14 +433,22 @@ class AQD:
         """Old path: fetch the URL into memory here, shrink, multipart POST (nothing touches disk)."""
         return self.upload_bytes(rid, fetch_image(url), _url_filename(url))
 
-    def _server_batch(self, rid, urls):
+    def _server_batch(self, rid, urls, roles=None):
         """One POST {image_urls}. Returns {url: (photo_id|None, error|None)}. Raises on transport/whole-request
         errors. Server answers 201 if >=1 created, 422 if none; photos come back in request order."""
         sent = {}
         for u in urls:
             sent.setdefault(_upsize_google(u), []).append(u)
         # no blind retry on timeouts/5xx (the server may have created the photos); 429 is safe to retry
-        body = self.call("POST", f"{API}/{int(rid)}/photos", json_body={"image_urls": list(sent)},
+        # #704: {url, role} items -> server keeps pending_role and sets cover/logo itself after the async download
+        roles, used, items = roles or {}, set(), []
+        for su, origs in sent.items():
+            r = next((roles.get(o) for o in origs if roles.get(o) in ("cover", "logo")), None)
+            if r and r not in used:
+                used.add(r); items.append({"url": su, "role": r})
+            else:
+                items.append(su)
+        body = self.call("POST", f"{API}/{int(rid)}/photos", json_body={"image_urls": items},
                          timeout=60 + 20 * len(sent), raw_status=(422,), retries=3, retry_status=(429,),
                          retry_network=False)
         photos, errors = body.get("photos"), body.get("errors")
@@ -452,12 +461,18 @@ class AQD:
                            {"sent": len(sent), "photos": len(photos), "errors": len(failed)}, "POST image_urls")
         res, it = {}, iter(photos)
         for su, origs in sent.items():
-            val = (None, failed[su] or "error") if su in failed else (int(next(it)["id"]), None)
+            if su in failed:
+                val = (None, failed[su] or "error")
+            else:
+                ph = next(it)
+                val = (int(ph["id"]), None)
+                if ph.get("status") == "pending":
+                    self.pending_roles[int(ph["id"])] = ph.get("pending_role")
             for orig in origs:
                 res[orig] = val
         return res
 
-    def upload_urls(self, rid, urls):
+    def upload_urls(self, rid, urls, roles=None):
         """Upload image URLs (deduped, order kept). Server-side download in parallel batches; any URL the
         server rejects (or a failed batch) falls back to the local in-memory fetch+upload.
         Returns [(url, photo_id|None, error|None, via)] with via in server|local."""
@@ -468,7 +483,7 @@ class AQD:
         if URL_UPLOAD_MODE == "server":
             n = max(1, min(URL_BATCH_MAX, -(-len(urls) // max(1, UPLOAD_WORKERS))))
             chunks = [urls[i:i + n] for i in range(0, len(urls), n)]
-            for chunk, res, err in self._parallel(chunks, lambda c: self._server_batch(rid, c)):
+            for chunk, res, err in self._parallel(chunks, lambda c: self._server_batch(rid, c, roles)):
                 if err:
                     for u in chunk:
                         done[u] = (None, "batch:" + err)
@@ -497,7 +512,8 @@ class AQD:
         """Upload image URLs (server downloads them; local fetch fallback). urls: list of str or
         {"url", "role"}. Returns [{"url","photo_id","role","error","via"}]."""
         items = [_url_item(u) for u in urls]
-        res = {u: (pid, err, via) for u, pid, err, via in self.upload_urls(rid, [it["url"] for it in items])}
+        res = {u: (pid, err, via) for u, pid, err, via in self.upload_urls(rid, [it["url"] for it in items],
+                                                                         {it["url"]: it.get("role") for it in items})}
         out = []
         for it in items:
             pid, err, via = res[it["url"]]
@@ -535,6 +551,9 @@ class AQD:
         os.replace(rec_path + ".tmp", rec_path)
         for role in ("cover", "logo"):
             hit = next((r for r in out if r["role"] == role and r.get("photo_id")), None)
+            if hit and hit["photo_id"] in self.pending_roles:
+                hit["assigned"] = self.pending_roles[hit["photo_id"]] == role   # server assigns on download
+                continue
             if hit and role not in album.get(hit["photo_id"], {}).get("roles", []):
                 self.assign(rid, hit["photo_id"], role)
                 hit["assigned"] = True
@@ -657,7 +676,8 @@ class AQD:
         url_jobs = [j for j in jobs if j[0] == "url"]
         results, via_n = [], {}
         with cf.ThreadPoolExecutor(2) as ex:
-            f_url = ex.submit(self.upload_urls, rid, [j[1] for j in url_jobs]) if url_jobs else None
+            f_url = ex.submit(self.upload_urls, rid, [j[1] for j in url_jobs],
+                              {it["url"]: it.get("role") for it in url_items}) if url_jobs else None
             results += self._parallel(file_jobs, up) if file_jobs else []
             if f_url:
                 ures = {u: (pid, err, via) for u, pid, err, via in f_url.result()}
@@ -699,6 +719,9 @@ class AQD:
                     warn.append(f"{it['role']}_url_not_uploaded")
         todo_roles = {}
         for role, pid in role_pid.items():
+            if pid in self.pending_roles:   # #704: still downloading; pending_role (if sent) is applied server-side
+                parts.append(f"{role}={pid}(pending_role)" if self.pending_roles[pid] == role else f"{role}=pending")
+                continue
             if role in album.get(pid, {}).get("roles", []):
                 parts.append(f"{role}=ok")
             else:
