@@ -149,6 +149,19 @@ say(f"config: queue={os.path.basename(MINE)} list_max_pages={MAX_PAGES or 'all'}
 while not stopall():
     if time.time() < until(R + "/fetch_backoff.txt"):
         say(f"fetch backoff; sleep {int(until(R + '/fetch_backoff.txt') - time.time())}s"); nap(until(R + "/fetch_backoff.txt") - time.time()); continue
+    pf = R + "/refetch_priority.txt"
+    if os.path.exists(pf):
+        _done = {l.split()[0] for l in open(pf + ".done", encoding="utf-8")} if os.path.exists(pf + ".done") else set()
+        _tr = read_json(pf + ".tries.json", {})
+        _pend = [t[0] for t in (l.split() for l in open(pf, encoding="utf-8")) if t and t[0].isdigit() and int(t[0]) % 2 == (0 if PARITY == "even" else 1)
+                 and t[0] not in _done and _tr.get(t[0], 0) < 3]
+        if _pend:
+            say(f"PRIORITY refetch: {len(_pend)} ids pending in refetch_priority.txt (full Chrome re-fetch first)")
+            rc = run(["refetch", "--limit", "10"])
+            if stopall(): break
+            if rc == 3: say("Google limited -> backoff (kept)")
+            elif rc != 0: say(f"refetch rc={rc}; retry in 60s"); nap(60)
+            continue
     state = read_json(STATE, {"start_page": 1})
     first, last = page_window(state, MAX_PAGES)
     span = f"pages {first}..{last}" if last else "pages from %d to the end of the list" % first
