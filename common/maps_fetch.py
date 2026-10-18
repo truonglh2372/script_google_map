@@ -220,7 +220,9 @@ def extras(p):
     return {"google_rating": g(p, 4, 7), "google_review_count": g(p, 4, 8),
             "rating_histogram": dict(zip(["1", "2", "3", "4", "5"], g(p, 175, 3) or [])) or None,
             "reviews": reviews(p), "opening_periods": periods, "hours_by_weekday": by_day,
-            "about": about(p), "description": description(p)}
+            "about": about(p), "description": description(p),
+            # Google lists no hours at all (the panel shows "Thêm giờ"): empty hours_by_weekday is real, not a parse miss
+            "hours_listed": bool(by_day)}
 
 
 def category(types, label):

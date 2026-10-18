@@ -11,6 +11,7 @@ import argparse, json, os, random, re, sys, time
 ROOT = os.environ.get("AQD_ROOT", "C:/aqd").replace("\\", "/")
 sys.path.insert(0, ROOT)
 import maps_fetch as mf
+import google_extras
 import aqd_api
 from aqd_api import AQD, AQDError, APIError, API, DATA_DIR, VERIFY, maps_place_id, normalize_fields, _url_hash, _upsize_google
 from fast_pass import classify, INTENTIONAL
@@ -361,24 +362,23 @@ def _review_photo_filter(extra):
 
 
 def push_extra(G, rid, folder, info, rec, save):
-    """extra.json locally (always) + opening periods via PUT only when the server has none. Returns log part."""
+    """extra.json locally (always), then About / Google reviews / weekly hours to the /v1 admin API
+    (google_extras.push: PATCH google_attributes+description, PUT google_reviews, PUT opening_hours source=google;
+    409 owner_confirmed = skip). Returns the log part."""
     ex = dict(info.get("_extra") or {}); ex["saved_at"] = time.strftime("%F %T")
     json.dump(ex, open(os.path.join(folder, "extra.json"), "w", encoding="utf-8"), ensure_ascii=False, indent=1)
-    per = ex.get("opening_periods")
-    if not per or rec.get("periods"):
-        return f"extra(r={ex.get('google_rating')},rv={len(ex.get('reviews') or [])},about={sum(len(x['items']) for x in ex.get('about') or [])})"
+    head = f"extra(r={ex.get('google_rating')},rv={len(ex.get('reviews') or [])},about={sum(len(x['items']) for x in ex.get('about') or [])})"
+    if os.environ.get("AQD_PUSH_EXTRAS", "1") in ("0", "false", "no"):
+        return head
     try:
-        cur = G.req("GET", f"{API}/{rid}/opening_periods").get("periods") or []
-        if cur:
-            rec["periods"] = "server_has"; save(); return "periods=kept_server"
-        G.req("PUT", f"{API}/{rid}/opening_periods", json_body={"periods": per}, raw_status=(422,))
-        got = G.req("GET", f"{API}/{rid}/opening_periods").get("periods") or []
-        rec["periods"] = len(got); save()
-        return f"periods={len(got)}/{len(per)}"
+        cur = G.req("GET", f"{API}/{rid}")["restaurant"] if (ex.get("description") or "").strip() else None
+        res = google_extras.push(G.req, rid, ex, current=cur, api_error=APIError)
+        rec["extras_v1"] = {"at": time.strftime("%F %T"), "result": res}; save()
+        return f"{head} {res}"
     except Overload:
         raise
     except Exception as e:
-        return f"periods_failed:{type(e).__name__}"
+        return f"{head} extras_failed:{type(e).__name__}:{e}"[:300]
 
 
 def push_one(G, rid):
