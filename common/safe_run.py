@@ -64,6 +64,16 @@ def _rec_photo(c, ph, roles):
     return d
 
 
+def _server_pending(G, rid):
+    """Ids of this place's URL photos the server has not downloaded yet (GET photos?status=pending, #704)."""
+    try:
+        return {int(p["id"]) for p in (G.req("GET", f"{API}/{rid}/photos?status=pending").get("photos") or [])}
+    except Overload:
+        raise
+    except Exception:
+        return None   # unknown -> callers must not PUT
+
+
 def _role_queued(rec, role):
     """A pending photo already carries pending_role=role -> the server will assign it; no PUT."""
     return next((v["photo_id"] for v in rec["urls"].values() if v.get("role") == role and v.get("photo_id")), None)
@@ -390,7 +400,8 @@ def push_one(G, rid):
             rec[role] = q; save(); parts.append(f"{role}={q}(pending_role)"); continue
         if hit and rec.get(role) != rec["urls"][_url_hash(hit["url"])]["photo_id"]:
             pid = rec["urls"][_url_hash(hit["url"])]["photo_id"]
-            if (rec["urls"][_url_hash(hit["url"])] or {}).get("status") == "pending": continue
+            pend = _server_pending(G, rid)
+            if pend is None or pid in pend: continue
             G.req("PUT", f"{API}/{rid}/{role}", json_body={"photo_id": pid}); rec[role] = pid; save()
             parts.append(f"{role}={pid}")
     # 4) status
@@ -840,8 +851,10 @@ def cmd_refetch(args):
                 q = _role_queued(rec, role)
                 if q and rec.get(role) in (None, rec.get("streetview")) and q != rec.get(role):
                     rec[role] = q; save(); parts.append(f"{role}={q}(pending_role)")
+            pend = _server_pending(G, rid)
             up = [c for c in items if (rec["urls"].get(_url_hash(c["url"])) or {}).get("photo_id")
-                  and (rec["urls"].get(_url_hash(c["url"])) or {}).get("status", "succeeded") != "pending"]
+                  and pend is not None and rec["urls"][_url_hash(c["url"])]["photo_id"] not in pend]
+            if pend: parts.append(f"srv_pending={len(pend)}")
             if up and (not rec.get("cover") or rec.get("cover") == rec.get("streetview")):
                 hit = next((c for c in up if c.get("role") == "cover"), up[0]); pid = rec["urls"][_url_hash(hit["url"])]["photo_id"]
                 G.req("PUT", f"{API}/{rid}/cover", json_body={"photo_id": pid}); rec["cover"] = pid; save(); parts.append(f"cover={pid}")
