@@ -545,11 +545,25 @@ def cmd_run(args):
                 time.sleep(7200); continue
             except Exception as e:
                 log(f"#{rid} PREP ERROR {type(e).__name__}: {str(e)[:150]}"); continue
-            if info is None: log(f"#{rid} PREP SKIP {reason}"); continue
+            if info is None:
+                log(f"#{rid} PREP SKIP {reason}")
+                # an empty page (no place block) is the only non-exception block signal; 429/sorry/consent/captcha raise mf.Blocked above
+                if reason == "no place block":
+                    streak += 1
+                    if streak >= 3:
+                        m = BACKOFF_MIN[min(level, 2)]; level += 1
+                        log(f"Maps empty page {streak} in a row (last #{rid}); pause Maps {m} min (level {level})")
+                        if os.environ.get("AQD_ALT"):
+                            open(ROOT + "/fetch_backoff.txt", "w", encoding="utf-8").write(str(time.time() + m * 60)); sys.exit(3)
+                        if not nap(m * 60): log("STOP file; end run"); break
+                continue
             lim, cnt, emb = limited_reason(info)
             m_ = info.get("_maps") or {}
             notypes = not info.get("google_types_text") or info.get("google_types_text") == "point_of_interest, establishment"
-            truly = bool(m_.get("thin")) and notypes and not (m_.get("cats") or [])
+            # A thin/sparse payload is NOT a block: checked 2026-10-18, #23701/#23703/#23705 were "thin" over plain HTTP
+            # yet loaded fully in Chrome with category + tabs, no captcha. Only captcha / unusual traffic / 429 (mf.Blocked)
+            # or an empty page count toward the backoff streak.
+            truly = False
             if truly: streak += 1
             elif streak or level:
                 if level: log(f"Maps full data back at #{rid}; normal pace")
