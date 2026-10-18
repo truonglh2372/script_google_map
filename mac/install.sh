@@ -32,7 +32,7 @@ RAW_BASE="https://raw.githubusercontent.com/truonglh2372/script_google_map/main"
 REPO="truonglh2372/script_google_map"
 REPO_GIT="https://github.com/${REPO}.git"
 REPO_ZIP="https://codeload.github.com/${REPO}/zip/refs/heads/main"
-REQUIRED_PKGS="requests pillow playwright openlocationcode"
+REQUIRED_PKGS="requests pillow playwright openlocationcode websockets"
 
 DRY_RUN=0
 CLEAN=0

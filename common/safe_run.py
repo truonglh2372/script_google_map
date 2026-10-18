@@ -111,6 +111,15 @@ def build_info(row):
                 raise mf.Blocked("captcha/unusual traffic in signed-in Chrome")
         except mf.Blocked:
             raise
+        except ImportError as e:
+            # Missing websockets / cdp_proxy is an install bug — do NOT silently fall back to thin HTTP.
+            print(
+                f"ERROR: cdp_proxy import failed ({type(e).__name__}: {e}). "
+                f"Install websockets (pip install websockets) or re-run the installer. "
+                f"Not falling back to plain HTTP.",
+                flush=True,
+            )
+            raise
         except Exception as e:
             print(f"chrome path failed ({type(e).__name__}: {str(e)[:100]}); plain HTTP fallback", flush=True)
             d = mf.fetch_place_json(pid); via = "http"; gal = None

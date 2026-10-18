@@ -54,7 +54,7 @@ $DefaultCdpPort = 9222
 $RawBase = 'https://raw.githubusercontent.com/truonglh2372/script_google_map/main'
 $RepoGit = 'https://github.com/truonglh2372/script_google_map.git'
 $RepoZip = 'https://codeload.github.com/truonglh2372/script_google_map/zip/refs/heads/main'
-$RequiredPkgs = @('requests', 'pillow', 'playwright', 'openlocationcode')
+$RequiredPkgs = @('requests', 'pillow', 'playwright', 'openlocationcode', 'websockets')
 
 function Say([string]$m) { Write-Host $m }
 function Head([string]$m) { Write-Host ""; Write-Host "==== $m" -ForegroundColor Cyan }

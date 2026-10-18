@@ -11,6 +11,16 @@ into an empty success. Everything else (pages, evaluate, clicks, scrolling) is b
 """
 import asyncio, json, os, threading, urllib.request
 
+try:
+    import websockets
+except ImportError as e:  # ModuleNotFoundError is a subclass
+    raise ImportError(
+        "cdp_proxy needs the 'websockets' package. "
+        "Install it with: python -m pip install websockets "
+        "(or re-run mac/install.sh / windows/install.ps1 — both list it in REQUIRED_PKGS). "
+        "Without websockets the Chrome CDP path cannot start and must not silently fall back to thin HTTP."
+    ) from e
+
 _STATE = {}
 
 
@@ -20,7 +30,6 @@ def _chrome_ws(port):
 
 
 async def _pipe(client):
-    import websockets
     port = _STATE["port"]
     async with websockets.connect(_chrome_ws(port), max_size=None, ping_interval=None) as up:
         pending = set()
@@ -66,7 +75,6 @@ def endpoint(port=None):
     ready = threading.Event()
 
     def run():
-        import websockets
         loop = asyncio.new_event_loop(); asyncio.set_event_loop(loop)
 
         async def handler(ws, *_):
