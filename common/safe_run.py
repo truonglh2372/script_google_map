@@ -333,7 +333,7 @@ def push_one(G, rid):
     for role, key in (("cover", "role"), ("logo", "role2")):
         hit = next((c for c in items if c.get(key) == role and _url_hash(c["url"]) in rec["urls"]), None)
         if not hit:  # fallback: first/second uploaded
-            up = [c for c in items if _url_hash(c["url"]) in rec["urls"]]
+            up = [c for c in items if (rec["urls"].get(_url_hash(c["url"])) or {}).get("photo_id")]
             hit = (up[0] if role == "cover" else (up[1] if len(up) > 1 else (up[0] if up else None))) if up else None
         if hit and rec.get(role) != rec["urls"][_url_hash(hit["url"])]["photo_id"]:
             pid = rec["urls"][_url_hash(hit["url"])]["photo_id"]
@@ -643,6 +643,164 @@ def cmd_backfill(args):
         log(f"#{rid} BACKFILL +{added} new photos (maps {len(info['photo_urls'])}/{m_.get('count')})")
 
 
+PRIORITY = ROOT + "/refetch_priority.txt"
+REFRESH_KEYS = ("category", "cuisine", "google_types_text", "google_primary_type", "google_primary_type_label")
+
+
+def _pbase(u):
+    return (u or "").split("=")[0]
+
+
+def priority_pending():
+    """Ids in refetch_priority.txt (first token per line) not yet in .done and tried < 3 times."""
+    if not os.path.exists(PRIORITY): return []
+    done = {l.split()[0] for l in open(PRIORITY + ".done", encoding="utf-8")} if os.path.exists(PRIORITY + ".done") else set()
+    tries = json.load(open(PRIORITY + ".tries.json", encoding="utf-8")) if os.path.exists(PRIORITY + ".tries.json") else {}
+    ids = []
+    for l in open(PRIORITY, encoding="utf-8"):
+        t = l.split()
+        if t and t[0].isdigit() and t[0] not in done and tries.get(t[0], 0) < 3 and int(t[0]) not in ids: ids.append(int(t[0]))
+    return ids
+
+
+def _dhash(url, size=8):
+    import io, requests as _rq
+    from PIL import Image
+    r = _rq.get(url, timeout=30, headers={"User-Agent": "Mozilla/5.0"}); r.raise_for_status()
+    im = Image.open(io.BytesIO(r.content)).convert("L").resize((size + 1, size))
+    px = list(im.getdata()); bits = 0
+    for y in range(size):
+        for x in range(size):
+            bits = (bits << 1) | (px[y * (size + 1) + x] > px[y * (size + 1) + x + 1])
+    return bits
+
+
+def _server_hashes(G, rid):
+    """dHash of every photo already on the server (Google grass-cs URLs change per session, so URLs can't dedupe)."""
+    hs, page = [], 1
+    while page < 20:
+        b = G.req("GET", f"{API}/{rid}/photos?page={page}&per_page=50")
+        ps = b.get("photos") or []
+        for p in ps:
+            u = p.get("thumb_url") or p.get("url")
+            try: hs.append(_dhash(u))
+            except Exception: pass
+        if not ps or not b.get("has_more"): break
+        page += 1
+    return hs
+
+
+def _near(h, hs, bits=10):
+    return any(bin(h ^ x).count("1") <= bits for x in hs)
+
+
+def cmd_refetch(args):
+    """FULL re-fetch (Chrome) of the ids in refetch_priority.txt that were fetched thin, for places already pushed.
+    - info: fills fields the server has empty; category/cuisine/types only when the server still holds the old thin value
+      (never overrides a human edit); status and flags are never touched.
+    - photos: same CLIP filter as run; skips any photo whose base URL is already uploaded (applied.json) -> no duplicates.
+    - extra.json (reviews/About/hours) rewritten; opening periods only when the server has none.
+    - menu: MENU_DONE removed when menu photos newly appear, so menu_worker reads them.
+    Parity is enforced (AQD_PARITY). A result still via http/thin is not marked done (max 3 tries)."""
+    par = os.environ.get("AQD_PARITY") or ("even" if os.name == "nt" else "odd")
+    ids = [i for i in priority_pending() if i % 2 == (0 if par == "even" else 1)]
+    if args.limit: ids = ids[:args.limit]
+    if not ids: return
+    tf = PRIORITY + ".tries.json"; tries = json.load(open(tf, encoding="utf-8")) if os.path.exists(tf) else {}
+    G = Guard(); last_maps = 0.0
+    log(f"REFETCH START {len(ids)} ids #{ids[0]}..#{ids[-1]}")
+    for rid in ids:
+        if os.path.exists(STOPFILE): log("STOP file; end refetch"); break
+        folder = os.path.join(DATA_DIR, str(rid)); recp = os.path.join(folder, "applied.json")
+        tries[str(rid)] = tries.get(str(rid), 0) + 1; json.dump(tries, open(tf, "w", encoding="utf-8"))
+        w = MAPS_MIN_GAP + random.uniform(0, MAPS_JITTER) - (time.time() - last_maps)
+        if w > 0 and not nap(w): break
+        try:
+            cur = G.req("GET", f"{API}/{rid}")["restaurant"]
+            last_maps = time.time()
+            info, reason = build_info(cur)
+        except mf.Blocked as e:
+            log(f"#{rid} REFETCH Maps BLOCKED {e}; back off 2h")
+            tries[str(rid)] -= 1; json.dump(tries, open(tf, "w", encoding="utf-8"))
+            open(ROOT + "/fetch_backoff.txt", "w", encoding="utf-8").write(str(time.time() + 7200)); sys.exit(3)
+        except Overload as e:
+            log(f"#{rid} REFETCH OVERLOAD {e}; wait 5 min"); nap(COOLDOWN); continue
+        except Exception as e:
+            log(f"#{rid} REFETCH ERROR {type(e).__name__}: {str(e)[:150]}"); continue
+        if info is None:
+            log(f"#{rid} REFETCH SKIP {reason}"); continue
+        m_ = info["_maps"]
+        if m_.get("via") != "chrome" or m_.get("thin"):
+            log(f"#{rid} REFETCH still thin (via={m_.get('via')} thin={m_.get('thin')}); not done, try {tries[str(rid)]}/3"); continue
+        os.makedirs(folder, exist_ok=True)
+        f = os.path.join(folder, "info.json")
+        old = json.load(open(f, encoding="utf-8")) if os.path.exists(f) else {}
+        if old and not os.path.exists(f + ".thin"):
+            json.dump(old, open(f + ".thin", "w", encoding="utf-8"), ensure_ascii=False, indent=1)
+        rec = json.load(open(recp, encoding="utf-8")) if os.path.exists(recp) else {}
+        rec.setdefault("urls", {})
+        save = lambda: (json.dump(rec, open(recp + ".tmp", "w", encoding="utf-8"), ensure_ascii=False, indent=1), os.replace(recp + ".tmp", recp))
+        parts = []
+        try:
+            fields, _w = normalize_fields({k: v for k, v in info.items() if k not in SKIP_KEYS})
+            ofields, _ = normalize_fields({k: v for k, v in old.items() if k not in SKIP_KEYS}) if old else ({}, None)
+            empty = lambda v: v is None or (isinstance(v, str) and not v.strip()) or v == []
+            send = {}
+            for k, v in fields.items():
+                if empty(v): continue
+                sv = cur.get(k)
+                if empty(sv) or (k in REFRESH_KEYS and sv == ofields.get(k) and sv != v):
+                    send[k] = v
+            if send: G.req("PATCH", f"{API}/{rid}", json_body=send)
+            parts.append(f"info={len(send)}f[{','.join(sorted(send))[:80]}]")
+            parts.append(push_extra(G, rid, folder, info, rec, save))
+            # POST {image_urls} is async now (202, photos: []), so applied.json got no ids since 2026-10-12: every URL the
+            # thin run posted is on the server already -> treat the old info.json photo URLs as uploaded too.
+            have = {_pbase(x.get("url")) for x in rec["urls"].values()} | {_pbase(x.get("url")) for x in old.get("photo_urls") or []}
+            items = info.get("photo_urls") or []
+            todo = [it for it in items if _pbase(it["url"]) not in have and _url_hash(it["url"]) not in rec["urls"]]
+            if todo:
+                hs = _server_hashes(G, rid); keep = []; dup = 0
+                for it in todo:
+                    try: h = _dhash(it["url"].split("=")[0] + "=s256")
+                    except Exception: dup += 1; continue   # unreadable -> do not risk a duplicate
+                    if _near(h, hs): dup += 1; continue
+                    hs.append(h); keep.append(it)
+                todo = keep; parts.append(f"dup_skipped={dup}/srv{len(hs) - len(keep)}")
+            added = failed = 0
+            for i in range(0, len(todo), PHOTO_CHUNK):
+                chunk = todo[i:i + PHOTO_CHUNK]
+                body = G.req("POST", f"{API}/{rid}/photos", json_body={"image_urls": [_upsize_google(c["url"]) for c in chunk]}, raw_status=(422,))
+                bad = {e.get("url") for e in body.get("errors") or [] if isinstance(e, dict)}; it_ = iter(body.get("photos") or [])
+                for c in chunk:
+                    if _upsize_google(c["url"]) in bad: failed += 1; continue
+                    ph = next(it_, None)
+                    # queued (async) photos are recorded without an id so a later pass never re-posts them
+                    rec["urls"][_url_hash(c["url"])] = {"url": c["url"], "photo_id": int(ph["id"]) if ph else None}; added += 1
+                save()
+            parts.append(f"photos=+{added}" + (f"/fail{failed}" if failed else "") + f"/of{len(items)}")
+            # cover: only replace the script's own streetview / missing cover; logo only if none set by the script
+            up = [c for c in items if (rec["urls"].get(_url_hash(c["url"])) or {}).get("photo_id")]
+            if up and (not rec.get("cover") or rec.get("cover") == rec.get("streetview")):
+                hit = next((c for c in up if c.get("role") == "cover"), up[0]); pid = rec["urls"][_url_hash(hit["url"])]["photo_id"]
+                G.req("PUT", f"{API}/{rid}/cover", json_body={"photo_id": pid}); rec["cover"] = pid; save(); parts.append(f"cover={pid}")
+            if len(up) > 1 and not rec.get("logo"):
+                hit = next((c for c in up if c.get("role2") == "logo"), up[1]); pid = rec["urls"][_url_hash(hit["url"])]["photo_id"]
+                G.req("PUT", f"{API}/{rid}/logo", json_body={"photo_id": pid}); rec["logo"] = pid; save(); parts.append(f"logo={pid}")
+        except Overload as e:
+            log(f"#{rid} REFETCH OVERLOAD {e}; wait 5 min"); nap(COOLDOWN); continue
+        except Exception as e:
+            log(f"#{rid} REFETCH PUSH ERROR {type(e).__name__}: {str(e)[:150]}"); continue
+        json.dump(info, open(f + ".tmp", "w", encoding="utf-8"), ensure_ascii=False, indent=1); os.replace(f + ".tmp", f)
+        if info.get("has_menu_photos") and not old.get("has_menu_photos") and os.path.exists(os.path.join(folder, "MENU_DONE")):
+            os.replace(os.path.join(folder, "MENU_DONE"), os.path.join(folder, "MENU_DONE.thin")); parts.append("menu=requeued")
+        elif info.get("has_menu_photos"): parts.append("menu_photos=yes")
+        open(PRIORITY + ".done", "a", encoding="utf-8").write(f"{rid} {' '.join(parts)} {time.strftime('%F %H:%M')}\n")
+        log(f"#{rid} REFETCH OK {info.get('name','')[:40]!r} cat={info.get('category')} types={(info.get('google_types_text') or '')[:50]!r} "
+            f"gallery={m_.get('gallery')} {' '.join(parts)}")
+    log(f"REFETCH END; {len(priority_pending())} priority ids left")
+
+
 if __name__ == "__main__":
     ap = argparse.ArgumentParser(); ap.add_argument("cmd"); ap.add_argument("--limit", type=int, default=0)
     ap.add_argument("--pages", type=int, default=12); ap.add_argument("--ids", type=int, nargs="*")
@@ -651,4 +809,4 @@ if __name__ == "__main__":
     ap.add_argument("--per-page", type=int, default=0); ap.add_argument("--unnamed", action="store_true")
     ap.add_argument("--id-suffix", default="")
     a = ap.parse_args()
-    {"prep": cmd_prep, "push": cmd_push, "run": cmd_run, "list": cmd_list, "backfill": cmd_backfill}[a.cmd](a)
+    {"prep": cmd_prep, "push": cmd_push, "run": cmd_run, "list": cmd_list, "backfill": cmd_backfill, "refetch": cmd_refetch}[a.cmd](a)
