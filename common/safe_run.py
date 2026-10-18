@@ -74,6 +74,15 @@ def _server_pending(G, rid):
         return None   # unknown -> callers must not PUT
 
 
+def _put_role(G, rid, role, pid):
+    """PUT cover/logo; 422 (photo pending/failed on the server) is skipped, not a place-level error that re-queues it."""
+    try:
+        G.req("PUT", f"{API}/{rid}/{role}", json_body={"photo_id": pid}); return True
+    except APIError as e:
+        if e.status == 422: return False
+        raise
+
+
 def _role_queued(rec, role):
     """A pending photo already carries pending_role=role -> the server will assign it; no PUT."""
     return next((v["photo_id"] for v in rec["urls"].values() if v.get("role") == role and v.get("photo_id")), None)
@@ -96,7 +105,12 @@ class Guard:
         if w > 0: time.sleep(w)
         t = time.time()
         try:
-            return self.a.call(method, path, retries=0, timeout=HTTP_TO, retry_status=(), retry_network=False, **kw)
+            try:
+                return self.a.call(method, path, retries=0, timeout=HTTP_TO, retry_status=(), retry_network=False, **kw)
+            except AQDError as e0:
+                if isinstance(e0, APIError) or method not in ("GET", "PUT"): raise
+                time.sleep(10)
+                return self.a.call(method, path, retries=0, timeout=HTTP_TO, retry_status=(), retry_network=False, **kw)
         except APIError as e:
             if e.status >= 500 or e.status == 429:
                 raise Overload(f"{method} {path} HTTP {e.status}")
@@ -118,26 +132,54 @@ const m=t.match(/(\\/maps\\/preview\\/place\\?[^"'\\s]+)/);if(!m)return {err:'no
 const u=m[1].replace(/&amp;/g,'&');const r2=await fetch(u,{credentials:'include'});return {status:r2.status,body:await r2.text()}}"""
 
 
+def _pw_reset():
+    """Tear down the Playwright driver completely. A sync_playwright() left started after a failure keeps its asyncio
+    loop registered on this thread, so the NEXT sync_playwright().start() raises "Sync API inside the asyncio loop"
+    (2026-10-18: one Page.goto timeout -> every later place fell back to thin HTTP)."""
+    _PW.pop("pg", None); b = _PW.pop("b", None); p = _PW.pop("p", None)
+    try:
+        if b: b.close()
+    except Exception: pass
+    try:
+        if p: p.stop()
+    except Exception: pass
+
+
+def _pw_page():
+    if "pg" in _PW:
+        try:
+            if not _PW["pg"].is_closed(): return _PW["pg"]
+        except Exception: pass
+        _pw_reset()
+    from playwright.sync_api import sync_playwright
+    try:
+        _PW["p"] = sync_playwright().start()
+        b = _PW["b"] = _PW["p"].chromium.connect_over_cdp(__import__("cdp_proxy").endpoint())
+        ctx = b.contexts[0]; pg = ctx.pages[0] if ctx.pages else ctx.new_page()
+        _PW["pg"] = pg
+    except BaseException:
+        _pw_reset(); raise
+    return pg
+
+
+def _maps_home(pg):
+    # Maps rarely fires "load" within 30s on Chrome 155; DOM ready is all the fetch() below needs.
+    pg.goto("https://www.google.com/maps?hl=vi", wait_until="domcontentloaded", timeout=60000); pg.wait_for_timeout(2000)
+
+
 def browser_place_json(pid):
     """Same two requests as maps_fetch, but made by the signed-in Chrome (CDP port 9222) itself."""
-    if "pg" not in _PW:
-        from playwright.sync_api import sync_playwright
-        _PW["p"] = sync_playwright().start()
-        try:
-            b = _PW["p"].chromium.connect_over_cdp(__import__("cdp_proxy").endpoint())
-        except Exception:
-            # stop the driver, otherwise every later call fails with "Sync API inside the asyncio loop"
-            # (seen on the Mac for 2 days after Chrome's CDP went down once)
-            try: _PW.pop("p").stop()
-            except Exception: pass
-            raise
-        ctx = b.contexts[0]; pg = ctx.pages[0] if ctx.pages else ctx.new_page()
-        if "google.com/maps" not in pg.url:
-            pg.goto("https://www.google.com/maps?hl=vi"); pg.wait_for_timeout(3000)
-        _PW["pg"] = pg
-    if "google.com" not in (_PW["pg"].url or ""):
-        _PW["pg"].goto("https://www.google.com/maps?hl=vi"); _PW["pg"].wait_for_timeout(2500)
-    r = _PW["pg"].evaluate(_JS, pid)
+    try:
+        pg = _pw_page()
+        if "google.com" not in (pg.url or ""): _maps_home(pg)
+        try: r = pg.evaluate(_JS, pid)
+        except Exception as e:
+            if "context was destroyed" not in str(e): raise
+            pg.wait_for_timeout(3000); r = pg.evaluate(_JS, pid)   # Maps' own redirect after DOM ready
+    except mf.Blocked:
+        raise
+    except Exception:
+        _pw_reset(); raise   # never leave a half-started driver behind
     t = r.get("body") or ""
     if not t or r.get("status") != 200 or "/sorry/" in (r.get("url") or ""):
         raise mf.Blocked(f"browser fetch {r.get('status')} {r.get('err')}")
@@ -172,6 +214,7 @@ def build_info(row):
             raise
         except Exception as e:
             print(f"chrome path failed ({type(e).__name__}: {str(e)[:100]}); plain HTTP fallback", flush=True)
+            _pw_reset()
             d = mf.fetch_place_json(pid); via = "http"; gal = None
     else:
         d = mf.fetch_place_json(pid)
@@ -402,7 +445,8 @@ def push_one(G, rid):
             pid = rec["urls"][_url_hash(hit["url"])]["photo_id"]
             pend = _server_pending(G, rid)
             if pend is None or pid in pend: continue
-            G.req("PUT", f"{API}/{rid}/{role}", json_body={"photo_id": pid}); rec[role] = pid; save()
+            if not _put_role(G, rid, role, pid): parts.append(f"{role}_skip={pid}"); continue
+            rec[role] = pid; save()
             parts.append(f"{role}={pid}")
     # 4) status
     if info.get("stay_draft"):
@@ -857,10 +901,12 @@ def cmd_refetch(args):
             if pend: parts.append(f"srv_pending={len(pend)}")
             if up and (not rec.get("cover") or rec.get("cover") == rec.get("streetview")):
                 hit = next((c for c in up if c.get("role") == "cover"), up[0]); pid = rec["urls"][_url_hash(hit["url"])]["photo_id"]
-                G.req("PUT", f"{API}/{rid}/cover", json_body={"photo_id": pid}); rec["cover"] = pid; save(); parts.append(f"cover={pid}")
+                if _put_role(G, rid, "cover", pid): rec["cover"] = pid; save(); parts.append(f"cover={pid}")
+                else: parts.append(f"cover_skip={pid}")
             if len(up) > 1 and not rec.get("logo"):
                 hit = next((c for c in up if c.get("role2") == "logo"), up[1]); pid = rec["urls"][_url_hash(hit["url"])]["photo_id"]
-                G.req("PUT", f"{API}/{rid}/logo", json_body={"photo_id": pid}); rec["logo"] = pid; save(); parts.append(f"logo={pid}")
+                if _put_role(G, rid, "logo", pid): rec["logo"] = pid; save(); parts.append(f"logo={pid}")
+                else: parts.append(f"logo_skip={pid}")
         except Overload as e:
             log(f"#{rid} REFETCH OVERLOAD {e}; wait 5 min"); nap(COOLDOWN); continue
         except Exception as e:
