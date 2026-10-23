@@ -1,10 +1,12 @@
 # script_google_map — bộ lấy dữ liệu Google Maps cho Ăn Uống Quanh Đây
 
+> **#855 (23/10/2026):** crawler **không còn model local** (bỏ CLIP, OCR, `photo_filter.py`, `menu_worker.py`). Mọi ảnh (trừ video) được upload lên API; API tự phân loại (food/drink/menu/interior/storefront_or_sign/receipt/other/unclassified) và chỉ ảnh menu mới đi vào flow đọc menu. `menu_worker` đã ngừng, không còn gọi `PUT /menu`, launchd `aqd.menu` để disabled.
+
 ## Cấu trúc
-- `common/` — dùng chung 2 máy: `aqd_api.py` (client API admin), `maps_fetch.py` (lấy thông tin quán, không cần trình duyệt), `safe_run.py` (chạy từng quán: list/run, đánh dấu `SAFE_DONE`), `photo_filter.py` (lọc ảnh bằng CLIP), `menu_worker.py` + `menu_ocr.py` + `menu_vocab.json` (OCR ảnh menu → tạo món/danh mục, đọc SĐT bảng hiệu).
-- `windows/` — máy Admin: `install.ps1` (cài 1 lệnh), `alt.py` (vòng lặp fetch), `start_fetcher.ps1`, `start_menu_worker.ps1`, `aqd_*.cmd` (đặt trong thư mục Startup để tự chạy khi đăng nhập).
-- `mac/` — Mac mini: `install.sh` (**cài 1 lệnh**, tương đương `windows/install.ps1`), `alt.py`, và launchd plist **mẫu** (`aqd.alt`, `aqd.chrome`, `aqd.menu`) trong `mac/launchd/`; `install.sh` thay `__AQD_*__` theo root rồi ghi vào `~/Library/LaunchAgents/`. `install_mac.sh` **đã bị thay thế** (xem đầu file).
-- `tools/` — `cleanup.py` (sửa/ẩn món sai đã ghi), `build_vocab.py`, các patch.
+- `common/` — dùng chung 2 máy: `aqd_api.py` (client API admin), `maps_fetch.py` (lấy thông tin quán, không cần trình duyệt), `safe_run.py` (chạy từng quán: list/run, đánh dấu `SAFE_DONE`).
+- `windows/` — máy Admin: `install.ps1` (cài 1 lệnh), `alt.py` (vòng lặp fetch), `start_fetcher.ps1`, `aqd_fetcher.cmd` (đặt trong thư mục Startup để tự chạy khi đăng nhập).
+- `mac/` — Mac mini: `install.sh` (**cài 1 lệnh**, tương đương `windows/install.ps1`), `alt.py`, và launchd plist **mẫu** (`aqd.alt`, `aqd.chrome`) trong `mac/launchd/`; `install.sh` thay `__AQD_*__` theo root rồi ghi vào `~/Library/LaunchAgents/`. `install_mac.sh` **đã bị thay thế** (xem đầu file).
+- `tools/` — `cleanup.py` (sửa/ẩn món sai đã ghi), test installer.
 
 ## ⚡ Cài / cập nhật bằng 1 lệnh, không hỏi gì (dùng cho máy đang chạy)
 
@@ -19,10 +21,10 @@ curl -fsSL https://raw.githubusercontent.com/truonglh2372/script_google_map/main
 Khi có `AQD_YES=1`, installer chạy hết **không hỏi gì**:
 - Tải code mới nhất từ repo về.
 - **Dừng sạch** fetcher và menu worker của root này: tạo `STOP_ALL`, chờ tối đa 10 phút để chúng dừng ở ranh giới giữa 2 quán. Quá 10 phút mới kill; done marker vẫn giữ tiến độ.
-- Cài dependency, gồm cả CLIP và easyocr. Gói nào đã có thì pip bỏ qua.
+- Cài dependency nhẹ (`requirements.txt`). Không còn CLIP/easyocr.
 - **Giữ nguyên** `creds.env`, `chrome-profile/`, `aqd_data/` (mọi `SAFE_DONE` / `MENU_DONE`) và cách chia ID đã lưu trong `aqd_config.json`. Nếu chưa lưu cách chia nào thì Windows lấy ID **chẵn**, Mac lấy ID **lẻ**.
-- Đăng ký tự chạy khi đăng nhập: Startup folder trên Windows, launchd `aqd.chrome` / `aqd.alt` / `aqd.menu` trên Mac.
-- Xoá `STOP_ALL` rồi **bật lại** cả fetcher (`alt.py`) lẫn menu worker.
+- Đăng ký tự chạy khi đăng nhập: Startup folder trên Windows, launchd `aqd.chrome` / `aqd.alt` trên Mac (`aqd.menu` cũ bị bootout + disable).
+- Xoá `STOP_ALL` rồi **bật lại** fetcher (`alt.py`).
 
 Muốn đổi giá trị thì đặt biến môi trường cùng tên trước lệnh, ví dụ `AQD_ID_SUFFIXES="1 3"`, `AQD_PARITY=odd`, `AQD_ADMIN_EMAIL=...` hoặc `AQD_ADMIN_PASSWORD=...` (dùng khi máy mới chưa có `creds.env`). Bỏ `AQD_YES` thì installer quay về chế độ hỏi từng câu như mô tả bên dưới. Lưu ý: GitHub raw có thể trễ tới khoảng 5 phút sau khi push.
 
@@ -52,7 +54,7 @@ irm https://raw.githubusercontent.com/truonglh2372/script_google_map/main/window
 Installer in ngay đầu một dòng tóm tắt để biết Enter sẽ ra gì:
 
 ```
-Enter = defaults: base=https://anuongquanhday.com  CLIP=no  OCR=no  id_suffixes=<required>  list_max_pages=20  fetch_limit=0  startup=no
+Enter = defaults: base=https://anuongquanhday.com  id_suffixes=<required>  list_max_pages=20  fetch_limit=0  startup=no
 REQUIRED (no default, asked until valid): AQD_ID_SUFFIXES (digits 0-9), AQD_ADMIN_EMAIL. Everything else is Enter.
 AQD_ADMIN_PASSWORD: Enter keeps the value already in creds.env when there is one.
 ```
@@ -80,21 +82,9 @@ Dòng log trong `alt.out` (và `safe_run_log.md`) trước khi list:
 
 Khi backend đã có `per_page` / `unnamed` / `id_suffix` / `summary` thì `alt.py` xin `per_page=50` + `unnamed=1` + `id_suffix` để mỗi trang chỉ chứa quán của máy mình; nếu server **chưa** có (hoặc bỏ qua `per_page`), script tự phát hiện và **quay về 24/trang như cũ** — log ghi `LIST mode=legacy …`, không crash, không sót quán.
 
-### Gói nặng (CLIP / OCR) và tiến độ cài
+### Gói nặng
 
-Nhóm nặng tách làm **2 nhóm**, hỏi riêng, **mặc định là No** (Enter = **không cài**):
-
-| Nhóm | Gói | Dung lượng tải thật (PyPI, Python 3.12/Windows) | Tác dụng |
-|---|---|---|---|
-| CLIP (torch + open_clip_torch) | `torch`, `open_clip_torch` | **~156 MB** (riêng `torch` 118 MB) | Lọc ảnh: giữ ảnh món/đồ uống/menu, bỏ ảnh không liên quan |
-| OCR (easyocr) | `easyocr` | **~242 MB** (~124 MB thêm nếu đã cài CLIP, vì chung `torch`) | Đọc ảnh menu và bảng hiệu để tạo món/danh mục |
-
-- Installer in **dung lượng ước tính** trước khi hỏi (CLIP **~156 MB**, OCR **~242 MB**, thêm **~124 MB** nếu đã có CLIP vì chung `torch`) và mặc định **No**: bấm **Enter là không tải gì**, gõ `y` mới tải.
-- Trong lúc cài, output của pip **in trực tiếp ra màn hình** (4 dòng mới nhất mỗi 2 giây) và **cứ 15 giây in một dòng** kiểu `pip CLIP (torch + open_clip_torch) still running after 7m 30s - it is NOT frozen, full log: C:\aqd\pip-heavy-torch.log`; xong thì in **thời gian đã mất** và `rc`.
-- Log đầy đủ nằm ở `C:\aqd\pip-required.log` và `C:\aqd\pip-heavy-<nhóm>.log` (ví dụ `pip-heavy-torch.log`, `pip-heavy-easyocr.log` — mỗi nhóm một file để nhóm sau không ghi đè lý do nhóm trước fail).
-- pip chạy với `--timeout 60 --retries 5`: mạng treo thì pip tự bỏ cuộc và báo lỗi rõ thay vì chờ vô hạn.
-- Máy chỉ có **Python 3.13/3.14**: `torch`/`torchvision` có thể **không có wheel** cho bản đó → pip sẽ **build từ source** (hàng giờ). Installer **dò wheel trước** (`pip index versions torch`, tối đa 2 phút); không có wheel thì **cảnh báo và bỏ qua nhóm nặng** (hỏi lại, mặc định là Không) và khuyên cài Python 3.12 bằng `winget install -e --id Python.Python.3.12`.
-- Bỏ hết nhóm nặng: `-SkipHeavy` (CLIP/OCR yếu hơn, mọi thứ khác vẫn chạy).
+Không còn (#855): ảnh do API phân loại. `-SkipHeavy` / `--skip-heavy` vẫn nhận nhưng không còn tác dụng.
 
 Cờ khi cần (gọi qua script block, không cần biến môi trường): `-Root <dir>`, `-Clean`, `-NoStart`, `-NoChrome`, `-SkipHeavy`, `-Yes`.
 
@@ -154,7 +144,7 @@ Câu trả lời được đọc từ `/dev/tty`, nên `curl ... | bash` vẫn h
 Installer in ngay đầu một dòng tóm tắt để biết Enter sẽ ra gì:
 
 ```
-Enter = defaults: base=https://anuongquanhday.com  CLIP=no  OCR=no  id_suffixes=<required>  list_max_pages=20  fetch_limit=0  startup=no
+Enter = defaults: base=https://anuongquanhday.com  id_suffixes=<required>  list_max_pages=20  fetch_limit=0  startup=no
 REQUIRED (no default, asked until valid): AQD_ID_SUFFIXES (digits 0-9), AQD_ADMIN_EMAIL. Everything else is Enter.
 AQD_ADMIN_PASSWORD: Enter keeps the value already in creds.env when there is one.
 ```
@@ -164,8 +154,6 @@ AQD_ADMIN_PASSWORD: Enter keeps the value already in creds.env when there is one
 | `AQD_ADMIN_EMAIL` | — (không có mặc định) | **BẮT BUỘC**; phải có `@`, sai thì hỏi lại |
 | `AQD_ADMIN_PASSWORD` | giữ giá trị đang có trong `creds.env` (chưa có file thì **bắt buộc**) | có điều kiện |
 | `AQD_BASE` | `https://anuongquanhday.com` | không |
-| CLIP (torch + open_clip_torch, ~156 MB) | **No** (in dung lượng trước khi hỏi) | không |
-| OCR (easyocr, ~242 MB) | **No** | không |
 | `AQD_ID_SUFFIXES` | — (không có mặc định) | **BẮT BUỘC**; chỉ chữ số 0-9, nhận `"1 3 5"` và `"1,3,5"`; `even`/`odd` quay về `AQD_PARITY`; sai thì hỏi lại |
 | `AQD_LIST_MAX_PAGES` | `20` | không |
 | `AQD_FETCH_LIMIT` | `0` | không |

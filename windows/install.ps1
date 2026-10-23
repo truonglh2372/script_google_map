@@ -23,7 +23,7 @@
 
   Two things that used to look like a freeze:
     * the heavy pip groups now stream their output, print a "still running" line every 15s and report the
-      elapsed time, and pip itself gets --timeout 60 --retries 5. Pick CLIP and/or OCR separately, or -SkipHeavy.
+      elapsed time, and pip itself gets --timeout 60 --retries 5. (#855: no heavy groups any more; -SkipHeavy is accepted and ignored.)
       On Python 3.13+ the installer checks for a torch wheel first and skips the groups when there is none
       (a source build can take hours). Python 3.12 is preferred.
     * the fetcher lists only AQD_LIST_MAX_PAGES pages (default 20, under a minute) before the first place is
@@ -308,13 +308,13 @@ function Install-Flat([string]$Src, [string]$NewRoot, [string]$Py, [string]$Suff
     Copy-Item -Force $f.FullName (Join-Path $NewRoot $f.Name)
     $copied++
   }
-  foreach ($f in @('alt.py', 'start_fetcher.ps1', 'start_menu_worker.ps1', 'aqd_fetcher.cmd', 'aqd_menu_worker.cmd')) {
+  foreach ($f in @('alt.py', 'start_fetcher.ps1', 'aqd_fetcher.cmd')) {
     $from = Join-Path $Src "windows\$f"
     if (Test-Path $from) { Copy-Item -Force $from (Join-Path $NewRoot $f); $copied++ } else { Warn "missing windows\$f" }
   }
   Ok "copied $copied files into $NewRoot (FLAT layout: every .py sits directly in $NewRoot)"
   $envLine = "`$env:AQD_ROOT='$NewRoot'; `$env:AQD_ID_SUFFIXES='$Suffixes'; `$env:AQD_PARITY='$Parity'; `$env:AQD_LIST_MAX_PAGES='$ListPages'; `$env:AQD_FETCH_LIMIT='$FetchLimit'`r`n"
-  foreach ($f in @('start_fetcher.ps1', 'start_menu_worker.ps1')) {
+  foreach ($f in @('start_fetcher.ps1')) {
     $p = Join-Path $NewRoot $f
     if (-not (Test-Path $p)) { Warn "missing $f"; continue }
     $t = [System.IO.File]::ReadAllText($p)
@@ -323,7 +323,7 @@ function Install-Flat([string]$Src, [string]$NewRoot, [string]$Py, [string]$Suff
     WriteNoBom $p ($envLine + $t)
     Ok "patched $($f): python path + root + env"
   }
-  foreach ($f in @('aqd_fetcher.cmd', 'aqd_menu_worker.cmd')) {
+  foreach ($f in @('aqd_fetcher.cmd')) {
     $p = Join-Path $NewRoot $f
     if (-not (Test-Path $p)) { continue }
     $t = [System.IO.File]::ReadAllText($p)
@@ -659,7 +659,7 @@ function Invoke-Install {
     Note "mode   : $(if ($clean) { 'CLEAN reinstall' } else { 'fresh install / update' })"
     Note "ref    : $ref"
     Note "payload: $RepoGit"
-    Note "Enter = defaults: base=$DefaultBase  CLIP=no  OCR=no  id_suffixes=<required>  list_max_pages=$DefaultListPages  fetch_limit=$DefaultFetchLimit  startup=$(if ($newRoot -eq $DefaultRoot) { 'yes' } else { 'no' })"
+    Note "Enter = defaults: base=$DefaultBase  id_suffixes=<required>  list_max_pages=$DefaultListPages  fetch_limit=$DefaultFetchLimit  startup=$(if ($newRoot -eq $DefaultRoot) { 'yes' } else { 'no' })"
     Note "REQUIRED (no default, asked until valid): AQD_ID_SUFFIXES (digits 0-9), AQD_ADMIN_EMAIL. Everything else is Enter."
     Note "AQD_ADMIN_PASSWORD: Enter keeps the value already in creds.env when there is one."
 
@@ -737,39 +737,7 @@ function Invoke-Install {
     if ($r.rc -eq 0) { Ok "required packages installed in $(Fmt-Secs $r.secs) (log: $($r.log))" }
     else { Warn "pip rc=$($r.rc) after $(Fmt-Secs $r.secs) - see $($r.log)"; Get-Content $r.log -Tail 12 -ErrorAction SilentlyContinue | ForEach-Object { Note $_ } }
 
-    $groups = @(
-      @{ name = 'CLIP (torch + open_clip_torch)'; pkgs = @('torch', 'open_clip_torch'); mb = 156
-         what = 'filters the photo gallery: keeps food/drink/menu photos, drops the rest' },
-      @{ name = 'OCR (easyocr)'; pkgs = @('easyocr'); mb = 242
-         what = 'reads menu photos and shop signs (adds about 124 MB once CLIP is in: torch is shared)' }
-    )
-    $heavy = -not $SkipHeavy.IsPresent
-    if (-not $heavy) { Note "heavy groups skipped (-SkipHeavy): CLIP/OCR filtering stays weak, everything else works" }
-    else {
-      $wheel = Test-TorchWheel $py
-      if ($wheel -eq 'yes') { Ok "torch has a wheel for $pyVer - no source build needed" }
-      elseif ($wheel -eq 'no') {
-        Warn "torch has NO wheel for Python ${pyVer}: pip would build it from source, which can take hours"
-        if (-not (Confirm "Install the heavy groups anyway?" $false)) {
-          $heavy = $false
-          Warn "heavy groups skipped - install Python 3.12 (winget install -e --id Python.Python.3.12) and re-run to get them"
-        }
-      } else {
-        Warn "could not tell whether torch has a wheel for Python $pyVer (see the probe log) - continuing"
-      }
-    }
-    if ($heavy) {
-      Note "The heavy groups download a few hundred MB and can take 10-30 minutes on a slow line."
-      Note "CLIP is about 156 MB (torch + open_clip_torch); OCR is about 242 MB (~124 MB more once CLIP is in)."
-      Note "Both default to NO: press Enter to skip. Go get a coffee if you do install one - this window prints progress and a 'still running' line every 15s. Do NOT close it."
-      foreach ($g in $groups) {
-        if (-not (Confirm "Install $($g.name)? ~$($g.mb) MB, 5-20 min. $($g.what)" ([bool]$Yes))) { Note "skipped $($g.name) (Enter = default no)"; continue }
-        $gLog = Join-Path $newRoot "pip-heavy-$($g.pkgs[0]).log"
-        $rg = Nat $py ($pipArgs + $g.pkgs) $gLog -Stream -Label "pip $($g.name)"
-        if ($rg.rc -eq 0) { Ok "$($g.name) installed in $(Fmt-Secs $rg.secs)" }
-        else { Warn "$($g.name) pip rc=$($rg.rc) after $(Fmt-Secs $rg.secs) - still runs, only this filtering is weaker (log: $($rg.log))" }
-      }
-    }
+    Note "no heavy groups: photos are classified by the API (#855), not on this machine"
 
     Head "8/8 Chrome + start"
     if ($NoChrome.IsPresent) { Warn "Chrome skipped (-NoChrome); CDP port for this root is $($cfg.cdpPort)" }
@@ -785,17 +753,20 @@ function Invoke-Install {
     $env:AQD_CDP_PORT = "$($cfg.cdpPort)"
     if (Confirm "Register auto-start at Windows login (Startup folder)?" ($newRoot -eq $DefaultRoot)) {
       $startup = [Environment]::GetFolderPath('Startup')
-      foreach ($f in @('aqd_fetcher.cmd', 'aqd_menu_worker.cmd')) {
+      foreach ($f in @('aqd_fetcher.cmd')) {
         $p = Join-Path $newRoot $f
         if (Test-Path $p) { Copy-Item -Force $p (Join-Path $startup $f); Ok "Startup\$f" }
+      }
+      # menu_worker is retired (#855: the API reads menus); drop its old Startup entries and their .disabled copies
+      foreach ($f in @('aqd_menu_worker.cmd', 'aqd_menu_worker.cmd.disabled', 'aqd_fetcher.cmd.disabled', 'aqd_foody.cmd.disabled')) {
+        $p = Join-Path $startup $f
+        if ((Test-Path $p) -and ($f -ne 'aqd_foody.cmd.disabled')) { Remove-Item -Force $p; Ok "removed Startup\$f" }
       }
     } else { Note "no Startup entry" }
 
     foreach ($sf in @('STOP_ALL', 'STOP')) { $sp = Join-Path $newRoot $sf; if (Test-Path $sp) { Remove-Item -Force $sp; Ok "removed $sf" } }
     if ($NoStart.IsPresent) { Warn "alt.py not started (-NoStart)" }
     else {
-      $mw = Join-Path $newRoot 'start_menu_worker.ps1'
-      if (Test-Path $mw) { & powershell -NoProfile -ExecutionPolicy Bypass -File $mw; Ok "menu worker started (start_menu_worker.ps1; log: $newRoot\menu_worker_log.md)" }
       if (@(Get-AqdProcs $newRoot).Count -gt 0) { Warn "alt.py/safe_run.py for $newRoot already running - not starting another" }
       else {
         Start-Process -WindowStyle Hidden -FilePath $py -ArgumentList (Join-Path $newRoot 'alt.py') -WorkingDirectory $newRoot

@@ -860,7 +860,7 @@ write_plists() {
   local out="$R/launchd" la="$HOME/Library/LaunchAgents" n
   mkdir_p "$out"
   mkdir_p "$la"
-  for n in aqd.alt aqd.chrome aqd.menu; do
+  for n in aqd.alt aqd.chrome; do
     if [ -f "$SRC/mac/launchd/$n.plist" ]; then
       render_plist "$SRC/mac/launchd/$n.plist" "$out/$n.plist"
       cp_f "$out/$n.plist" "$la/$n.plist"
@@ -913,7 +913,7 @@ startup_install() {
   local labels="" l
   write_plists
   if [ "$NO_CHROME" = 0 ]; then labels="$labels aqd.chrome"; fi
-  if [ "$NO_START" = 0 ]; then labels="$labels aqd.alt aqd.menu"; fi
+  if [ "$NO_START" = 0 ]; then labels="$labels aqd.alt"; fi
   if ! launchd_command; then
     warn "launchctl not found - the plists were written but not loaded; load them yourself or run alt.py by hand"
     return
@@ -922,6 +922,12 @@ startup_install() {
     launchd_bootout "$l"
     launchd_bootstrap "$l"
   done
+  # menu_worker is retired (#855: the API reads menus): keep an old aqd.menu job stopped and disabled
+  if [ -f "$HOME/Library/LaunchAgents/aqd.menu.plist" ]; then
+    launchd_bootout aqd.menu
+    if act "launchctl disable gui/$(id -u)/aqd.menu"; then launchctl disable "gui/$(id -u)/aqd.menu" 2>/dev/null || true; fi
+    ok "aqd.menu (menu_worker, retired) stays disabled"
+  fi
   if [ "$NO_START" = 0 ]; then ok "launchd aqd.alt bootstrapped (it sleeps 45s, then starts alt.py)"; fi
 }
 
@@ -998,41 +1004,8 @@ install_deps() {
     show_new_lines "$pip_log" 12
   fi
 
-  if [ "$SKIP_HEAVY" = 1 ]; then
-    note "heavy groups skipped (--skip-heavy): CLIP/OCR filtering stays weak, everything else works"
-    return
-  fi
-  if [ "$DRY_RUN" = 1 ]; then
-    note "[dry-run] would probe the torch wheel and offer CLIP (~156 MB) / OCR (~242 MB), both default No"
-    return
-  fi
-  note "checking whether torch has a wheel for this Python (pip index versions torch, max 2 min)"
-  wheel="$(probe_torch_wheel)"
-  case "$wheel" in
-    yes) ok "torch has a wheel for Python $PY_VER - no source build needed" ;;
-    no) warn "torch has NO wheel for Python $PY_VER: pip would build it from source, which can take hours"
-        if ! confirm "Install the heavy groups anyway?" no; then
-          warn "heavy groups skipped - install Python 3.12 (brew install python@3.12) and re-run to get them"
-          return
-        fi ;;
-    *) warn "could not tell whether torch has a wheel for Python $PY_VER - continuing" ;;
-  esac
-  note "The heavy groups download a few hundred MB and can take 10-30 minutes on a slow line."
-  note "CLIP is about 156 MB (torch + open_clip_torch); OCR is about 242 MB (~124 MB more once CLIP is in)."
-  note "Both default to NO: press Enter to skip. Do NOT close this window; progress prints every 15s."
-  local gspec
-  for gspec in \
-    "CLIP|torch open_clip_torch|156|filters the photo gallery: keeps food/drink/menu photos, drops the rest" \
-    "OCR|easyocr|242|reads menu photos and shop signs (adds about 124 MB once CLIP is in: torch is shared)"; do
-    IFS='|' read -r gname gpkgs gmb gwhat <<<"$gspec"
-    if ! confirm "Install $gname? ~$gmb MB, 5-20 min. $gwhat" "$(if [ "$YES" = 1 ]; then printf yes; else printf no; fi)"; then
-      note "skipped $gname (Enter = default no)"
-      continue
-    fi
-    glog="$R/pip-heavy-${gpkgs%% *}.log"
-    run_streamed "pip $gname ($gpkgs)" "$glog" "$PY" -m pip install --disable-pip-version-check --no-input --timeout 60 --retries 5 $gpkgs
-    if [ "$?" = 0 ]; then ok "$gname installed"; else warn "$gname pip failed - still runs, only this filtering is weaker (log: $glog)"; fi
-  done
+  # #855 / script_google_map #15: no local model any more (no CLIP, no OCR) - the API classifies every photo
+  note "no heavy groups: photos are classified by the API (#855), not on this machine"
 }
 
 main() {
@@ -1076,7 +1049,7 @@ main() {
   note "mode   : $(if [ "$CLEAN" = 1 ]; then printf 'CLEAN reinstall'; else printf 'fresh install / update'; fi)"
   note "ref    : $REF"
   note "payload: $REPO_GIT"
-  note "Enter = defaults: base=$DEFAULT_BASE  CLIP=no  OCR=no  id_suffixes=<required>  list_max_pages=$DEFAULT_LIST_PAGES  fetch_limit=$DEFAULT_FETCH_LIMIT  startup=$(if [ "$R" = "$HOME/aqd" ]; then printf 'yes'; else printf 'no'; fi)"
+  note "Enter = defaults: base=$DEFAULT_BASE  id_suffixes=<required>  list_max_pages=$DEFAULT_LIST_PAGES  fetch_limit=$DEFAULT_FETCH_LIMIT  startup=$(if [ "$R" = "$HOME/aqd" ]; then printf 'yes'; else printf 'no'; fi)"
   note "REQUIRED (no default, asked until valid): AQD_ID_SUFFIXES (digits 0-9), AQD_ADMIN_EMAIL. Everything else is Enter."
   note "AQD_ADMIN_PASSWORD: Enter keeps the value already in creds.env when there is one."
   if [ "$DRY_RUN" = 1 ]; then
@@ -1172,10 +1145,6 @@ main() {
       warn "REMEMBER: log in to Google in that Chrome window (the script cannot do it)"
     fi
     start_alt
-    if [ "$NO_START" = 0 ] && [ -f "$R/menu_worker.py" ]; then
-      if act "start menu_worker.py"; then (cd "$R" && nohup env AQD_ROOT="$R" "$PY" "$R/menu_worker.py" >"$R/menu_worker.out" 2>&1 &); fi
-      done_ok "started menu_worker.py (log: $R/menu_worker_log.md)"
-    fi
   fi
 
   say ""

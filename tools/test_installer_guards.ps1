@@ -172,7 +172,7 @@ CheckTrue "no raw Read-Host outside the two funnel functions" (
   (@([regex]::Matches($raw, 'Read-Host')).Count -le 4) -and ($raw -match 'Test-StdinRedirected') -and ($raw -match 'the value you type WILL be shown here in clear text'))
 CheckTrue "redirected stdin prints the prompt first" ($raw -match 'if \(Test-StdinRedirected\) \{ Say \$Prompt; return \(Read-Host\) \}')
 CheckTrue "the default summary line is printed" ($raw -match 'Enter = defaults:')
-CheckTrue "CLIP/OCR default to no (Enter = skip)" ($raw -match 'MB, 5-20 min\. \$\(') -and ($raw -match '\$false\)\) \{ Note "skipped')
+CheckTrue "no heavy CLIP/OCR groups (#855)" (-not ($raw -match 'open_clip_torch|easyocr'))
 
 $credTmp = Join-Path $env:TEMP ('aqd-cred-' + [guid]::NewGuid().ToString('N').Substring(0, 8))
 New-Item -ItemType Directory -Force -Path $credTmp | Out-Null

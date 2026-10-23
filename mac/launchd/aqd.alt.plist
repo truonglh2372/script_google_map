@@ -15,7 +15,6 @@
 <key>AQD_LIST_MAX_PAGES</key><string>__AQD_LIST_MAX_PAGES__</string>
 <key>AQD_FETCH_LIMIT</key><string>__AQD_FETCH_LIMIT__</string>
 <key>AQD_CDP_PORT</key><string>__AQD_CDP_PORT__</string>
-<key>AQD_CLIP_DEVICE</key><string>mps</string>
 <key>PYTHONIOENCODING</key><string>utf-8</string>
 <key>PYTHONUTF8</key><string>1</string>
 </dict>

@@ -119,8 +119,7 @@ for l in open(CREDS, encoding="utf-8"):
         k, v = l.split("=", 1); os.environ[k.strip()] = v.strip().strip('"').strip("'")
 for k in ("PHOTOS_IDS", "PHOTOS_LIMIT", "AQD_MEET_STOP"): os.environ.pop(k, None)
 os.environ.update(AQD_THROTTLE="2", AQD_UPLOAD_WORKERS="1", AQD_URL_BATCH_MAX="5", PYTHONIOENCODING="utf-8",
-                  PYTHONUTF8="1", AQD_ALT="1", AQD_CDP="1", AQD_CLIP="1")
-if sys.platform == "darwin": os.environ.setdefault("AQD_CLIP_DEVICE", "mps")
+                  PYTHONUTF8="1", AQD_ALT="1", AQD_CDP="1", )
 py = sys.executable; out = open(R + "/alt.out", "a", encoding="utf-8")
 ALL = R + "/queue_all_unnamed.json"
 IDLE = 600

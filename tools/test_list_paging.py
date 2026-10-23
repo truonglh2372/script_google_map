@@ -168,7 +168,7 @@ def mock_server(mode, drafts):
 
 
 def load_safe_run(base, root):
-    for name in ("safe_run", "aqd_api", "maps_fetch", "fast_pass", "olcdec", "photo_filter"):
+    for name in ("safe_run", "aqd_api", "maps_fetch", "fast_pass", "olcdec"):
         sys.modules.pop(name, None)
     if os.path.join(ROOT, "common") not in sys.path:
         sys.path.insert(0, os.path.join(ROOT, "common"))
