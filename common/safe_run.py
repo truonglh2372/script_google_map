@@ -220,12 +220,6 @@ def build_info(row):
         return None, "no place block"
     info = mf.parse(p, pid)
     info["_meta"]["via"] = via
-    sv = re.findall(r'https://streetviewpixels-pa\.googleapis\.com/v1/thumbnail\?[^"\\\s]+', json.dumps(d).replace("\\u0026", "&"))
-    sv = [u for u in sv if "panoid=" in u and "yaw=" in u]
-    if sv:
-        u = sv[0]
-        u = re.sub(r"([?&])w=\d+", r"\1w=1600", u); u = re.sub(r"([?&])h=\d+", r"\1h=1000", u)
-        info["_meta"]["sv"] = u
     if gal is not None and via == "chrome":
         L = getattr(PH, "LAST_LINKS", {})
         if L.get("facebook") and not info.get("facebook_url"): info["facebook_url"] = L["facebook"]
@@ -283,7 +277,6 @@ def build_info(row):
     info["photo_urls"] = out
     if reason: info["stay_draft"] = True; info["stay_reason"] = reason
     info["has_menu_photos"] = any("Thực đơn" in k for k in kinds)
-    if meta.get("sv"): info["_sv"] = meta["sv"]
     info["_maps"] = {"via": meta.get("via", "http"), "gallery": meta.get("gallery"), "place_id": pid, "thin": meta.get("thin"), "count": meta.get("maps_photo_count_label"), "cats": meta.get("photo_categories"), "photos_skipped": meta.get("photos_skipped", 0)}
     return info, reason
 
@@ -326,7 +319,7 @@ def cmd_prep(args):
     log(f"PREP END prepared {done}")
 
 
-SKIP_KEYS = ("_extra", "_sv", "cover", "logo", "stay_draft", "stay_reason", "note", "photo_urls", "has_menu_photos", "_maps")
+SKIP_KEYS = ("_extra", "cover", "logo", "stay_draft", "stay_reason", "note", "photo_urls", "has_menu_photos", "_maps")
 
 
 REVIEW_PHOTO_CAP = int(os.environ.get("AQD_REVIEW_PHOTO_CAP", "12"))
@@ -399,22 +392,7 @@ def push_one(G, rid):
             if p: rec["urls"][_url_hash(c["url"])] = _rec_photo(c, p, roles); added += 1
         save()
     parts.append(f"photos=+{added}" + (f"/fail{failed}" if failed else "") + f"/of{len(items)}")
-    if not rec["urls"] and info.get("_sv") and not rec.get("streetview"):
-        try:
-            import requests as _rq
-            from aqd_api import prepare_image
-            r_ = _rq.get(info["_sv"], timeout=30, headers={"User-Agent": "Mozilla/5.0"})
-            if r_.status_code == 200 and r_.headers.get("content-type", "").startswith("image"):
-                tmp = os.path.join(folder, "streetview.jpg"); open(tmp, "wb").write(r_.content)
-                import io as _io
-                ph = G.req("POST", f"{API}/{rid}/photos", files={"image": ("streetview.jpg", _io.BytesIO(prepare_image(tmp)), "image/jpeg")})["photo"]
-                rec["streetview"] = int(ph["id"]); save()
-                G.req("PUT", f"{API}/{rid}/cover", json_body={"photo_id": rec["streetview"]}); rec["cover"] = rec["streetview"]; save()
-                parts.append(f"streetview_cover={rec['streetview']}")
-        except Overload:
-            raise
-        except Exception as e:
-            warn.append(f"streetview_failed:{type(e).__name__}")
+    # No Street View fallback (#681): Google terms forbid re-hosting Street View imagery, so a place with no photo keeps no cover.
     # 3) cover / logo
     for role, key in (("cover", "role"), ("logo", "role2")):
         hit = next((c for c in items if c.get(key) == role and _url_hash(c["url"]) in rec["urls"]), None)
