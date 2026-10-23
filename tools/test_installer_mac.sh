@@ -275,8 +275,8 @@ EOF
 printf '\n' >>"$SIM/ans_a"
 run_install a "$SIM/ans_a" --root "$ROOT_A"
 assert_eq "exit code" "$(rc_of a)" 0
-assert_eq "prompt order" "$(prompt_seq a)" "AQD_ID_SUFFIXES,AQD_LIST_MAX_PAGES,AQD_FETCH_LIMIT,AQD_ADMIN_EMAIL,AQD_ADMIN_PASSWORD,AQD_BASE,InstallCLIP,InstallOCR,Register"
-for f in alt.py safe_run.py photos.py photos_new.py menu_vocab.json aqd_api.py; do
+assert_eq "prompt order" "$(prompt_seq a)" "AQD_ID_SUFFIXES,AQD_LIST_MAX_PAGES,AQD_FETCH_LIMIT,AQD_ADMIN_EMAIL,AQD_ADMIN_PASSWORD,AQD_BASE,Register"
+for f in alt.py safe_run.py photos.py photos_new.py aqd_api.py; do
   assert "flat layout: $f directly in the root" "$([ -f "$ROOT_A/$f" ] && echo 0 || echo 1)"
 done
 assert "no common/ subfolder" "$([ ! -d "$ROOT_A/common" ] && echo 0 || echo 1)"
@@ -292,8 +292,7 @@ assert_eq "creds base (Enter default)" "$(sed -n 's/^AQD_BASE=//p' "$ROOT_A/cred
 assert "creds has the password line" "$(grep -q '^AQD_ADMIN_PASSWORD=secretpass$' "$ROOT_A/creds.env" && echo 0 || echo 1)"
 assert "defaults summary printed" "$(has0 a 'Enter = defaults: base=https://anuongquanhday.com')"
 assert "required list printed" "$(has0 a 'REQUIRED (no default, asked until valid)')"
-assert "torch wheel probe is announced" "$(has0 a 'checking whether torch has a wheel for this Python')"
-assert "detects the torch wheel (no source build)" "$(has0 a 'torch has a wheel for Python 3.12.10 - no source build needed')"
+assert "no heavy groups: the API classifies photos (#855)" "$(has0 a 'no heavy groups: photos are classified by the API')"
 assert "flat layout message" "$(has0 a '(FLAT layout: every .py sits directly in')"
 assert "photos.py override explained" "$(has0 a 'hardcodes C:/aqd')"
 assert "reused the CDP 9222 with our own profile" "$(has0 a 'already open with this root')"
@@ -321,7 +320,7 @@ EOF
 printf '\n\n\n' >>"$SIM/ans_a2"
 run_install a2 "$SIM/ans_a2" --root "$ROOT_A"
 assert_eq "exit code" "$(rc_of a2)" 0
-assert_eq "prompt order (creds kept, no email prompt)" "$(prompt_seq a2)" "AQD_ID_SUFFIXES,AQD_LIST_MAX_PAGES,AQD_FETCH_LIMIT,OverwriteCreds,InstallCLIP,InstallOCR,Register"
+assert_eq "prompt order (creds kept, no email prompt)" "$(prompt_seq a2)" "AQD_ID_SUFFIXES,AQD_LIST_MAX_PAGES,AQD_FETCH_LIMIT,OverwriteCreds,Register"
 assert "keeps the existing creds.env" "$(has0 a2 'keeping the existing creds.env')"
 assert_eq "creds email unchanged" "$(sed -n 's/^AQD_ADMIN_EMAIL=//p' "$ROOT_A/creds.env")" "admin@example.com"
 assert_eq "creds password unchanged" "$(sed -n 's/^AQD_ADMIN_PASSWORD=//p' "$ROOT_A/creds.env")" "secretpass"
@@ -570,7 +569,7 @@ assert "no leftover placeholder" "$(hasnt0 g '__AQD_')"
 assert "plist points at this root's venv python" "$(grep -q "$ROOT_G/venv/bin/python" "$PLIST" && echo 0 || echo 1)"
 assert "plist points at this root" "$(grep -q "$ROOT_G/alt.py" "$PLIST" && echo 0 || echo 1)"
 assert "launchctl bootstrap was called" "$(grep -q "launchctl bootstrap gui/" "$SIM/stub.log" && echo 0 || echo 1)"
-assert "menu plist also rendered" "$(grep -q 'menu_worker.py' "$ROOT_G/launchd/aqd.menu.plist" && echo 0 || echo 1)"
+assert "menu plist no longer rendered (#855)" "$([ ! -e "$ROOT_G/launchd/aqd.menu.plist" ] && echo 0 || echo 1)"
 show_case g
 
 echo ""

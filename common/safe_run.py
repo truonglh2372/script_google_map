@@ -16,10 +16,6 @@ import aqd_api
 from aqd_api import AQD, AQDError, APIError, API, DATA_DIR, VERIFY, maps_place_id, normalize_fields, _url_hash, _upsize_google
 from fast_pass import classify, INTENTIONAL
 from olcdec import decode as olc_decode
-try:
-    import photo_filter as PF
-except Exception:
-    PF = None
 
 LOG = ROOT + "/safe_run_log.md"
 PROG = ROOT + "/aqd_progress.md"
@@ -271,16 +267,9 @@ def build_info(row):
     if not info.get("latitude"): reason = reason or "no coordinates"
     if not info.get("name"): reason = reason or "no name from Maps"
     if info.get("business_status") == "CLOSED_PERMANENTLY": reason = reason or "permanently closed"
-    # photos: drop videos; CLIP filter (food/drink/menu/venue only); roles
+    # photos: drop videos only; the API classifies every photo (#855, no local model)
     ph = [x for x in photos if "Video" not in (x.get("kind") or "")]
     photos_skipped = 0
-    if PF is not None and ph and __import__("os").environ.get("AQD_CLIP", "1") not in ("0", "false", "no"):
-        try:
-            kept, photos_skipped, _det = PF.filter_urls(ph, return_details=True)
-            ph = kept
-        except Exception as e:
-            print(f"photo_filter failed: {type(e).__name__}: {e}; keeping all", flush=True)
-            photos_skipped = 0
     meta["photos_skipped"] = photos_skipped
     kinds = [x.get("kind") or "" for x in ph]
     out = [{"url": x["url"] + "=s1600", "kind": x.get("kind") or ""} for x in ph]
@@ -344,20 +333,14 @@ REVIEW_PHOTO_CAP = int(os.environ.get("AQD_REVIEW_PHOTO_CAP", "12"))
 
 
 def _review_photo_filter(extra):
-    """Keep only review photos CLIP calls food/drink (cap total); nothing is uploaded, only stored in extra.json."""
+    """Keep review photos up to the cap (no local model; #855); nothing is uploaded, only stored in extra.json."""
     n = 0
     for rv in extra.get("reviews") or []:
         keep = []
         for u in rv.pop("photo_urls", []) or []:
             if n >= REVIEW_PHOTO_CAP: break
             n += 1
-            lab = None
-            if PF is not None and os.environ.get("AQD_CLIP", "1") not in ("0", "false", "no"):
-                try:
-                    res = PF.classify_url(u + "=s512"); lab = res.get("label")
-                except Exception:
-                    lab = None
-            if lab in ("food", "drink"): keep.append({"url": u, "label": lab})
+            keep.append({"url": u})
         rv["photos"] = keep
 
 
@@ -807,7 +790,7 @@ def cmd_refetch(args):
     """FULL re-fetch (Chrome) of the ids in refetch_priority.txt that were fetched thin, for places already pushed.
     - info: fills fields the server has empty; category/cuisine/types only when the server still holds the old thin value
       (never overrides a human edit); status and flags are never touched.
-    - photos: same CLIP filter as run; skips any photo whose base URL is already uploaded (applied.json) -> no duplicates.
+    - photos: same as run (videos dropped, no local filter); skips any photo whose base URL is already uploaded (applied.json) -> no duplicates.
     - extra.json (reviews/About/hours) rewritten; opening periods only when the server has none.
     - menu: MENU_DONE removed when menu photos newly appear, so menu_worker reads them.
     Parity is enforced (AQD_PARITY). A result still via http/thin is not marked done (max 3 tries)."""
