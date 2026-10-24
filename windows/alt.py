@@ -135,7 +135,7 @@ def beat(activity, **kw):
 
 def nap(sec):
     end = time.time() + sec
-    while time.time() < end and not stopall(): beat(f"chờ {int(sec // 60)} phút"); time.sleep(10)
+    while time.time() < end and not stopall(): beat(f"chờ {int(sec // 60)} phút", status="idle"); time.sleep(10)
 
 
 def run(args):
@@ -203,4 +203,4 @@ while not stopall():
     elif rc != 0: say(f"fetcher rc={rc}; retry in 60s"); nap(60)
     else: say("pass done; re-list")
 say("fetcher loop stopped (STOP_ALL)")
-beat("dừng (STOP_ALL)", force=True)
+beat("dừng (STOP_ALL)", status="idle", force=True)

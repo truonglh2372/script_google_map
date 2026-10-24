@@ -651,7 +651,7 @@ def cmd_run(args):
             except mf.Blocked as e:
                 log(f"#{rid} Maps BLOCKED {e}; back off 2h")
                 hb("note", "ip_blocked", f"Maps BLOCKED: {str(e)[:150]}")
-                hb("beat", "Maps BLOCKED, back off 2h", status="error", force=True)
+                hb("beat", "Maps BLOCKED, back off 2h", status="blocked", force=True)
                 if os.environ.get("AQD_ALT"):
                     open(ROOT + "/fetch_backoff.txt", "w", encoding="utf-8").write(str(time.time() + 7200)); sys.exit(3)
                 time.sleep(7200); continue
@@ -666,7 +666,7 @@ def cmd_run(args):
                         m = BACKOFF_MIN[min(level, 2)]; level += 1
                         log(f"Maps empty page {streak} in a row (last #{rid}); pause Maps {m} min (level {level})")
                         hb("note", "rate_limited", f"Maps empty page {streak} in a row; pause {m} min")
-                        hb("beat", f"Maps paused {m} min", status="degraded", force=True)
+                        hb("beat", f"Maps paused {m} min", status="blocked", force=True)
                         if os.environ.get("AQD_ALT"):
                             open(ROOT + "/fetch_backoff.txt", "w", encoding="utf-8").write(str(time.time() + m * 60)); sys.exit(3)
                         if not nap(m * 60): log("STOP file; end run"); break
@@ -695,7 +695,7 @@ def cmd_run(args):
             m = BACKOFF_MIN[min(level, 2)]; level += 1
             log(f"Maps truly limited {streak} in a row (last #{rid}: {lim}); pause Maps {m} min (level {level})")
             hb("note", "rate_limited", f"Maps limited {streak} in a row; pause {m} min")
-            hb("beat", f"Maps paused {m} min", status="degraded", force=True)
+            hb("beat", f"Maps paused {m} min", status="blocked", force=True)
             if os.environ.get("AQD_ALT"):
                 open(ROOT + "/fetch_backoff.txt", "w", encoding="utf-8").write(str(time.time() + m * 60)); sys.exit(3)
             if not nap(m * 60): log("STOP file; end run"); break

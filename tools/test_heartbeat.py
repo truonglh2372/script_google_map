@@ -76,12 +76,46 @@ class HeartbeatTest(unittest.TestCase):
         self.assertTrue(request.get_header("Idempotency-key").startswith(CRAWLER + "-hb-"))
         body = opener.bodies()[0]
         self.assertEqual(CRAWLER, body["crawler"])
-        self.assertEqual("may-01", body["hostname"])
+        self.assertEqual("may-01", body["host"])
         self.assertEqual("FETCH 20 drafts", body["activity"])
-        self.assertEqual({"restaurants": 2, "photos": 9, "dishes": 0, "errors": 1}, body["counts"])
-        self.assertEqual("degraded", body["status"])
-        self.assertEqual("error: APIError: boom", body["error_summary"])
+        self.assertEqual((2, 9, 0, 1, 0), (body["processed_count"], body["photo_count"], body["dish_count"],
+                                           body["error_count"], body["rate_limited_count"]))
+        self.assertEqual("running", body["status"])
+        self.assertEqual("error: APIError: boom", body["note"])
         self.assertIsInstance(body["disk_free_mb"], int)
+
+    def test_the_body_has_only_the_web_1024_contract_fields(self):
+        opener = FakeOpener(201)
+        hb = self.make(opener)
+        hb.record_place(True, photos=2, dishes=5)
+        self.clock[0] += 120
+        self.assertTrue(hb.beat("x" * 300, range_label="r" * 150, force=True))
+        body = opener.bodies()[0]
+        allowed = {"crawler", "host", "status", "activity", "range_label", "window_seconds", "processed_count",
+                   "photo_count", "dish_count", "error_count", "rate_limited_count", "disk_free_mb", "note"}
+        self.assertLessEqual(set(body), allowed)
+        self.assertEqual(120, body["window_seconds"])
+        self.assertEqual(200, len(body["activity"]))
+        self.assertEqual(100, len(body["range_label"]))
+        self.assertIn(body["status"], ("running", "idle", "blocked", "error"))
+
+    def test_an_idle_heartbeat_covers_the_time_since_the_last_one(self):
+        opener = FakeOpener(201)
+        hb = self.make(opener)
+        self.assertTrue(hb.beat(force=True))
+        self.clock[0] += 600
+        self.assertTrue(hb.beat("end of list, sleeping", status="idle", force=True))
+        body = opener.bodies()[1]
+        self.assertEqual(("idle", 600, 0), (body["status"], body["window_seconds"], body["processed_count"]))
+
+    def test_only_errors_means_error_and_a_crawler_slug_is_required(self):
+        opener = FakeOpener(201)
+        hb = self.make(opener)
+        hb.record_place(False)
+        hb.beat(force=True)
+        self.assertEqual("error", opener.bodies()[0]["status"])
+        with self.assertRaises(ValueError):
+            heartbeat.Heartbeat("Bad Name", self.dir, token="t")
 
     def test_counts_reset_after_an_accepted_heartbeat_and_sends_are_spaced(self):
         opener = FakeOpener(201)
@@ -92,8 +126,8 @@ class HeartbeatTest(unittest.TestCase):
         self.assertFalse(hb.beat())            # 15 minutes not yet passed
         self.clock[0] += 15 * 60
         self.assertTrue(hb.beat())
-        self.assertEqual([1, 1], [b["counts"]["restaurants"] for b in opener.bodies()])
-        self.assertEqual("ok", opener.bodies()[1]["status"])
+        self.assertEqual([1, 1], [b["processed_count"] for b in opener.bodies()])
+        self.assertEqual("running", opener.bodies()[1]["status"])
 
     def test_a_failed_send_keeps_the_counts_and_retries_the_same_body_with_the_same_key(self):
         opener = FakeOpener(503, OSError("down"), 201)
@@ -106,7 +140,7 @@ class HeartbeatTest(unittest.TestCase):
         self.assertTrue(hb.beat(force=True))
         self.assertEqual(1, len(set(opener.keys())))
         self.assertEqual(1, len({json.dumps(b, sort_keys=True) for b in opener.bodies()}))
-        self.assertEqual(1, opener.bodies()[2]["counts"]["restaurants"])
+        self.assertEqual(1, opener.bodies()[2]["processed_count"])
 
     def test_new_counts_after_a_failure_start_a_new_key(self):
         opener = FakeOpener(500, 201)
@@ -116,34 +150,42 @@ class HeartbeatTest(unittest.TestCase):
         hb.record_place(True)
         self.assertTrue(hb.beat(force=True))
         self.assertNotEqual(opener.keys()[0], opener.keys()[1])
-        self.assertEqual(2, opener.bodies()[1]["counts"]["restaurants"])
+        self.assertEqual(2, opener.bodies()[1]["processed_count"])
 
     def test_a_refused_body_is_dropped_not_resent_forever(self):
-        opener = FakeOpener(409, 201)
+        opener = FakeOpener(422, 201)
         hb = self.make(opener)
         hb.record_place(True)
         self.assertFalse(hb.beat(force=True))
         self.assertTrue(hb.beat(force=True))
         self.assertNotEqual(opener.keys()[0], opener.keys()[1])
 
-    def test_issues_are_limited_to_the_known_list(self):
+    def test_a_blocking_issue_makes_the_crawler_blocked_and_goes_into_the_note(self):
         opener = FakeOpener(201)
         hb = self.make(opener)
         hb.note("ip_blocked", "Maps BLOCKED; back off 2h")
         hb.note("made_up_issue")
+        self.assertTrue(hb.beat(force=True))
+        body = opener.bodies()[0]
+        self.assertEqual("blocked", body["status"])
+        self.assertEqual("ip_blocked; Maps BLOCKED; back off 2h", body["note"])
+        self.assertNotIn("made_up_issue", body["note"])
+
+    def test_rate_limits_are_counted_and_an_explicit_status_wins(self):
+        opener = FakeOpener(201)
+        hb = self.make(opener)
+        hb.note("rate_limited", "busy")
+        hb.note("rate_limited", "busy again")
         self.assertTrue(hb.beat(status="error", force=True))
         body = opener.bodies()[0]
-        self.assertEqual(["ip_blocked"], [i for i in body["issues"] if i != "disk_full"])
-        self.assertEqual("error", body["status"])
-        self.assertEqual("Maps BLOCKED; back off 2h", body["error_summary"])
+        self.assertEqual((2, "error"), (body["rate_limited_count"], body["status"]))
 
-    def test_low_disk_adds_disk_full(self):
+    def test_disk_free_is_reported_as_is(self):
         opener = FakeOpener(201)
         hb = self.make(opener)
         hb.disk_free_mb = lambda: 300
         hb.beat(force=True)
-        self.assertEqual(["disk_full"], opener.bodies()[0]["issues"])
-        self.assertEqual("degraded", opener.bodies()[0]["status"])
+        self.assertEqual(300, opener.bodies()[0]["disk_free_mb"])
 
     def test_no_token_or_disabled_means_no_request_and_no_state(self):
         opener = FakeOpener(201)
