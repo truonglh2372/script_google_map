@@ -4,7 +4,7 @@ Replaces the dead listugcposts pager (#1083): Google no longer serves /maps/rpc/
 signed in); the Reviews tab now pages through a WizUi batchexecute RPC that needs page-minted tokens. We do NOT build
 that request by hand. Instead the crawler's own signed-in tab does what a person does:
 
-  open the place -> Reviews tab -> sort "Mới nhất" -> scroll the panel (1.5-3 s jittered waits, <= MAX_SCROLLS)
+  open the place -> Reviews tab -> sort newest first ("Mới nhất"; see pick_sort_button) -> scroll the panel (1.5-3 s jittered waits, <= MAX_SCROLLS)
   -> click "Xem thêm"/"Thêm" -> read the cards -> de-dupe by review id with the preview rows.
 
 Stop at the cap (AQD_MAX_REVIEWS, default 50), at Google's review count, or when a scroll loads nothing new
@@ -13,6 +13,7 @@ Parsing is pure Python over the cards' outerHTML so it is testable with saved fi
 """
 from __future__ import annotations
 
+import json
 import random
 import re
 import unicodedata
@@ -176,13 +177,26 @@ def merge(preview, dom, cap, sorted_newest=True):
     return out[:cap]
 
 
-def page_reviews(drv, have, cap, want=None, max_scrolls=MAX_SCROLLS, wait=WAIT, rand=random.uniform):
+def _count(v):
+    try:
+        return int(v) if v is not None and str(v).strip() != "" else None
+    except (TypeError, ValueError):
+        return None
+
+
+def page_reviews(drv, have, cap, want=None, rating=None, max_scrolls=MAX_SCROLLS, wait=WAIT, rand=random.uniform):
     """Drive the Reviews panel through `drv` (PageDriver or a test fake) and return (rows, note).
 
-    note: "dom_skip" (preview already enough), "dom_no_tab", "dom+N/Ss" (N new rows, S scrolls; ",unsorted" when the
-    sort menu was not found), "dom_err:Type". Never raises: any problem keeps the preview rows."""
+    want = Google's review count, rating = Google's star rating (either may be None).
+    note: "dom_skip" (preview already covers Google's count or the cap), "dom_skip0" (the place has no reviews:
+    count 0, or no count, no rating and no preview rows -> the panel is not opened at all), "dom_no_tab",
+    "dom+N/Ss" (N new rows, S scrolls; ",unsorted:<why>" when the newest-first sort could not be applied),
+    "dom_err:Type". Never raises: any problem keeps the preview rows."""
     rows = [r for r in (have or []) if r.get("id")][:cap]
-    goal = min(cap, want) if isinstance(want, int) and want > 0 else cap
+    n = _count(want)
+    if n == 0 or (n is None and rating in (None, "", 0) and not rows):
+        return rows, "dom_skip0"
+    goal = min(cap, n) if n and n > 0 else cap
     if len(rows) >= goal:
         return rows, "dom_skip"
     pause = lambda: drv.pause(rand(*wait))
@@ -190,7 +204,9 @@ def page_reviews(drv, have, cap, want=None, max_scrolls=MAX_SCROLLS, wait=WAIT, 
     try:
         if not drv.open_reviews():
             return rows, "dom_no_tab"
-        sorted_newest = bool(drv.sort_newest())
+        s = drv.sort_newest()
+        sorted_newest = s is True
+        why = s if isinstance(s, str) and s else ""
         pause()
         dom = parse_cards(drv.cards_html())
         while len(merge(rows, dom, cap, sorted_newest)) < goal and scrolls < max_scrolls:
@@ -209,7 +225,7 @@ def page_reviews(drv, have, cap, want=None, max_scrolls=MAX_SCROLLS, wait=WAIT, 
         return rows, f"dom_err:{type(e).__name__}"
     out = merge(rows, dom, cap, sorted_newest)
     added = len({r["id"] for r in out} - {r["id"] for r in rows})
-    return out, f"dom+{added}/{scrolls}s" + ("" if sorted_newest else ",unsorted")
+    return out, f"dom+{added}/{scrolls}s" + ("" if sorted_newest else ",unsorted" + (f":{why}" if why else ""))
 
 
 # ---- the real page (Playwright sync Page of the crawler's signed-in Chrome) ----
@@ -224,12 +240,76 @@ _JS_EXPAND = """()=>{let n=0; for(const b of document.querySelectorAll('div.jfti
 _JS_TAB = """()=>{const t=[...document.querySelectorAll('button[role=tab]')].find(b=>/^(Bài đánh giá|Reviews)/i.test(
   (b.getAttribute('aria-label')||'').normalize('NFC').trim()) || /^(Bài đánh giá|Reviews)$/i.test((b.textContent||'').normalize('NFC').trim()));
   if(!t) return false; if(t.getAttribute('aria-selected')!=='true') t.click(); return true}"""
-_JS_SORT_OPEN = """()=>{const b=[...document.querySelectorAll('button[aria-haspopup=true],button[data-value]')].find(x=>
-  /Sắp xếp|Phù hợp nhất|Mới nhất|Sort|Most relevant|Newest/i.test(((x.getAttribute('aria-label')||'')+' '+(x.getAttribute('data-value')||'')+' '+x.textContent).normalize('NFC')));
-  if(!b) return false; if(/Mới nhất|Newest/i.test(b.textContent.normalize('NFC'))) return 'already'; b.click(); return true}"""
-_JS_SORT_PICK = """()=>{const items=[...document.querySelectorAll('[role=menu] [role=menuitemradio],[role=menu] [role=menuitem]')];
-  const i=items.find(x=>/^(Mới nhất|Newest)$/i.test(x.textContent.normalize('NFC').trim())) || items.find(x=>x.getAttribute('data-index')==='1');
-  if(!i) return false; i.click(); return true}"""
+# Sort menu (an_uong_quanh_day#1110). Google serves the panel per account/region (Mac: lang="vi", Admin: lang="vi-RU",
+# narrower window) so labels, Unicode form and render timing differ. Find things by structure first, text second:
+#   button: aria-haspopup button ABOVE the first review card, outside cards; by label (any known language) ->
+#           class FNe70d -> the nearest such button above the cards.
+#   item:   "newest" label (NFC) -> data-index=1 -> 2nd radio item; only in a menu of >= 3 radio items (a sort menu).
+# Clicks are real mouse clicks (Playwright), the menu is awaited (polling, up to 4 s, one retry), and success is
+# VERIFIED by the button label changing to "newest" (or at least away from the old label).
+SORT_LABELS = ["Sắp xếp", "Phù hợp nhất", "Mới nhất", "Xếp hạng cao nhất", "Xếp hạng thấp nhất",
+               "Sort", "Most relevant", "Newest", "Highest rating", "Lowest rating",
+               "Сортировка", "Самые релевантные", "Сначала новые", "Новые", "Сначала с высокой оценкой",
+               "Сначала с низкой оценкой"]
+NEWEST_LABELS = ["Mới nhất", "Newest", "Сначала новые", "Новые"]
+_SORT_RE = re.compile(r"^(?:%s)" % "|".join(map(re.escape, SORT_LABELS)), re.I)
+_NEWEST_RE = re.compile(r"^(?:%s)$" % "|".join(map(re.escape, NEWEST_LABELS)), re.I)
+
+
+def _nfc(s):
+    return unicodedata.normalize("NFC", s or "").strip()
+
+
+def _label(n):
+    return _nfc(n.attrs.get("aria-label")) or _nfc(n.text())
+
+
+def pick_sort_button(root):
+    """Python twin of _JS_FIND_SORT over a parsed page (tests): the sort button node or None."""
+    nodes = list(root.iter())
+    first = next((i for i, n in enumerate(nodes) if n.tag == "div" and "jftiEf" in n.cls() and n.attrs.get("data-review-id")), len(nodes))
+    def in_card(n):
+        p = n.parent
+        while p is not None:
+            if "jftiEf" in p.cls():
+                return True
+            p = p.parent
+        return False
+    bs = [n for n in nodes[:first] if n.tag == "button" and n.attrs.get("aria-haspopup") in ("true", "menu") and not in_card(n)]
+    return (next((b for b in bs if _SORT_RE.search(_label(b)) or _SORT_RE.search(_nfc(b.text()))), None)
+            or next((b for b in bs if "FNe70d" in b.cls()), None)
+            or next((b for b in reversed(bs) if "aria-expanded" in b.attrs), None))
+
+
+def pick_newest_item(root):
+    """Python twin of _JS_PICK: the 'newest' item of an open sort menu, or None (not a sort menu)."""
+    items = [n for n in root.iter() if n.attrs.get("role") in ("menuitemradio", "menuitem", "option")]
+    radios = [n for n in items if n.attrs.get("role") in ("menuitemradio", "option")] or items
+    if len(radios) < 3:
+        return None
+    return (next((i for i in radios if _NEWEST_RE.search(_nfc(i.text()))), None)
+            or next((i for i in radios if i.attrs.get("data-index") == "1"), None)
+            or radios[1])
+
+
+_JS_RX = ("const N=s=>(s||'').normalize('NFC').trim();"
+          f"const SORT=new RegExp({json.dumps(_SORT_RE.pattern)},'i'), NEW=new RegExp({json.dumps(_NEWEST_RE.pattern)},'i');"
+          "const L=b=>N(b.getAttribute('aria-label'))||N(b.textContent);")
+_JS_FIND_SORT = ("function(){" + _JS_RX +
+    "const c=document.querySelector('div.jftiEf[data-review-id]');"
+    "const bs=[...document.querySelectorAll('button[aria-haspopup=true],button[aria-haspopup=menu]')].filter(b=>"
+    "!b.closest('div.jftiEf')&&(!c||(b.compareDocumentPosition(c)&Node.DOCUMENT_POSITION_FOLLOWING)));"
+    "return bs.find(b=>SORT.test(L(b))||SORT.test(N(b.textContent)))||bs.find(b=>b.classList.contains('FNe70d'))"
+    "||[...bs].reverse().find(b=>b.hasAttribute('aria-expanded'))||null}")
+_JS_SORT_BTN = "()=>(" + _JS_FIND_SORT + ")()"
+_JS_IS_NEWEST = "(b)=>{" + _JS_RX + "return NEW.test(L(b))||NEW.test(N(b.textContent))}"
+_JS_ITEMS = ("()=>{const it=[...document.querySelectorAll('[role=menuitemradio],[role=menuitem],[role=option]')].filter(x=>x.offsetParent!==null||x.getClientRects().length);"
+             "const r=it.filter(x=>x.getAttribute('role')!=='menuitem'); return r.length?r:it}")
+_JS_MENU_READY = "()=>(" + _JS_ITEMS + ")().length>=3"
+_JS_PICK = ("()=>{" + _JS_RX + "const r=(" + _JS_ITEMS + ")(); if(r.length<3) return null;"
+            "return r.find(x=>NEW.test(N(x.textContent)))||r.find(x=>x.getAttribute('data-index')==='1')||r[1]}")
+_JS_APPLIED = ("(before)=>{" + _JS_RX + "const b=(" + _JS_FIND_SORT + ")(); if(!b) return false; const l=L(b);"
+               "return NEW.test(l)||NEW.test(N(b.textContent))||(!!l&&l!==before)}")
 
 
 def place_url(info, hexid=None):
@@ -264,15 +344,51 @@ class PageDriver:
             return False
         return True
 
-    def sort_newest(self):
-        r = self.pg.evaluate(_JS_SORT_OPEN)
-        if r == "already":
+    def _poll(self, js, arg=None, timeout=4000):
+        try:
+            self.pg.wait_for_function(js, arg=arg, polling=250, timeout=timeout)
             return True
-        if not r:
+        except Exception:
             return False
-        self.pause(random.uniform(0.8, 1.6))
-        if not self.pg.evaluate(_JS_SORT_PICK):
-            return False
+
+    def _close_menu(self):
+        try:
+            self.pg.keyboard.press("Escape")
+        except Exception:
+            pass
+
+    def sort_newest(self):
+        """True when the panel is verified sorted newest-first, else a short reason string (never raises on misses)."""
+        btn = self.pg.evaluate_handle(_JS_SORT_BTN).as_element()
+        if not btn:
+            return "no_btn"
+        if btn.evaluate(_JS_IS_NEWEST):
+            return True
+        before = btn.evaluate("b=>(b.getAttribute('aria-label')||b.textContent||'').normalize('NFC').trim()")
+        opened = False
+        for attempt in range(2):                      # real mouse click, then one DOM click as a fallback
+            try:
+                btn.click(timeout=5000) if attempt == 0 else btn.evaluate("b=>b.click()")
+            except Exception:
+                pass
+            if self._poll(_JS_MENU_READY):
+                opened = True
+                break
+        if not opened:
+            self._close_menu()
+            return "no_menu"
+        self.pause(random.uniform(0.4, 0.9))
+        item = self.pg.evaluate_handle(_JS_PICK).as_element()
+        if not item:
+            self._close_menu()
+            return "no_item"
+        try:
+            item.click(timeout=5000)
+        except Exception:
+            item.evaluate("x=>x.click()")
+        if not self._poll(_JS_APPLIED, arg=before, timeout=5000):
+            self._close_menu()
+            return "not_applied"
         self.pause(random.uniform(1.5, 2.5))
         return True
 
