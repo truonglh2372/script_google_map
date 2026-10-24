@@ -135,9 +135,20 @@ def stopall(): return os.path.exists(R + "/STOP_ALL")
 def until(f): return float(open(f, encoding="utf-8").read()) if os.path.exists(f) else 0
 
 
+def beat(activity, **kw):
+    """Crawler heartbeat (an_uong_quanh_day#1021): at most one per AQD_HEARTBEAT_EVERY_MIN, no-op without
+    AQD_INGEST_TOKEN; best effort, never stops the loop."""
+    try:
+        if R not in sys.path: sys.path.insert(0, R)
+        import heartbeat
+        heartbeat.Heartbeat("script_google_map", R).beat(activity, **kw)
+    except Exception:
+        pass
+
+
 def nap(sec):
     end = time.time() + sec
-    while time.time() < end and not stopall(): time.sleep(10)
+    while time.time() < end and not stopall(): beat(f"chờ {int(sec // 60)} phút", status="idle"); time.sleep(10)
 
 
 def run(args):
@@ -205,9 +216,11 @@ while not stopall():
             say(f"no unnamed {LABEL} drafts left in pages {first}..{last or 'end'}; sleep {IDLE//60} min"); nap(IDLE)
         continue
     say(f"FETCH {len(queue)} {LABEL} drafts #{queue[0]['id']}..#{queue[-1]['id']}")
+    beat(f"FETCH {len(queue)} {LABEL} drafts #{queue[0]['id']}..#{queue[-1]['id']}")
     rc = run(["run", "--ignore-peak", "--sleep", "0", "--floor", "0", "--queue", MINE, "--limit", str(FETCH_LIMIT)])
     if stopall(): break
     if rc == 3: say("Google limited -> backoff (kept)")
     elif rc != 0: say(f"fetcher rc={rc}; retry in 60s"); nap(60)
     else: say("pass done; re-list")
 say("fetcher loop stopped (STOP_ALL)")
+beat("dừng (STOP_ALL)", status="idle", force=True)
