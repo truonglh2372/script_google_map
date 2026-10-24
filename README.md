@@ -238,6 +238,7 @@ Windows mặc định **cp1252**, nên mọi `open()` thiếu `encoding="utf-8"`
 ```powershell
 python tools/test_id_filter.py          # lọc ID theo đuôi + parity (cả windows/alt.py và mac/alt.py)
 python tools/test_list_paging.py        # list từng phần: ETA, cửa sổ trang, AQD_FETCH_LIMIT, fallback server cũ
+python tools/test_no_streetview.py      # #681: không tải ảnh Street View lên, không đặt làm ảnh bìa
 powershell -File tools/test_installer_stream.ps1   # Nat -Stream (tiến độ pip) + tín hiệu sống + timeout
 powershell -File tools/test_installer_guards.ps1   # guard theo root, Chrome theo root, cảnh báo đuôi/parity, CLEAN dọn .py lạ, mọi prompt có mặc định
 bash tools/test_installer_mac.sh        # installer Mac: prompt/mặc định, layout phẳng, aqd_config.json, cảnh báo trùng, guard root, Chrome theo root, plist, CLEAN (mọi công cụ macOS đều được stub; cần bash)
