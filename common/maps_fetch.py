@@ -134,10 +134,8 @@ def _env_int(name, default, lo=1):
 
 
 # an_uong_quanh_day#1083: keep up to AQD_MAX_REVIEWS (default 50) reviews per place. The preview embeds only 5-8, the
-# rest come from paging listugcposts in the signed-in Chrome (more_reviews); signed out, Google answers 403.
+# rest are read by scrolling the Reviews panel in the signed-in Chrome (reviews_dom.py, an_uong_quanh_day#1108).
 REVIEW_CAP = _env_int("AQD_MAX_REVIEWS", 50)
-UGC_PAGE = 20
-UGC_MAX_PAGES = 6
 _WD = {"Thứ Hai": 1, "Thứ Ba": 2, "Thứ Tư": 3, "Thứ Năm": 4, "Thứ Sáu": 5, "Thứ Bảy": 6, "Chủ Nhật": 7}
 
 
@@ -181,7 +179,7 @@ def _ts(us):
 
 
 def review_row(n):
-    """One review node (the same shape in the preview and in listugcposts) -> row, or None."""
+    """One review node of the place preview -> row, or None."""
     if not isinstance(n, list):
         return None
     meta, body = g(n, 1) or [], g(n, 2) or []
@@ -214,59 +212,6 @@ def reviews(p, cap=None):
         if len(out) >= cap:
             break
     return _newest_first(out)
-
-
-def ugc_path(hexid, token="", n=UGC_PAGE, sid="aqd"):
-    """Same-origin path of the Maps reviews pager (what the Reviews tab calls while scrolling), newest first."""
-    return ("/maps/rpc/listugcposts?authuser=0&hl=vi&gl=vn&pb="
-            f"!1m6!1s{hexid}!6m4!4m1!1e1!4m1!1e3!2m2!1i{int(n)}!2s{token or ''}!5m2!1s{sid}!7e81"
-            "!8m9!2b1!3b1!5b1!7b1!12m4!1b1!2b1!4m1!1e1!11m0!13m1!1e1")
-
-
-def parse_ugc(text):
-    """listugcposts body (")]}'" + JSON) -> (rows, next_token|None). Raises ValueError on a non-JSON body."""
-    t = (text or "").lstrip()
-    if t.startswith(")]}'"):
-        t = t[4:]
-    d = json.loads(t)
-    rows = [x for x in (review_row(g(r, 0)) for r in (g(d, 2) or []) if isinstance(r, list)) if x and x.get("id")]
-    tok = g(d, 1)
-    return rows, (tok if isinstance(tok, str) and tok else None)
-
-
-def more_reviews(fetch, hexid, have, cap=None, want=None, page=UGC_PAGE, max_pages=UGC_MAX_PAGES):
-    """Page the reviews of `hexid` until `cap` rows (or `want`, Google's review count) or the source runs out.
-
-    fetch(path) -> (http_status, body_text): a same-origin GET in the signed-in Chrome. `have` (the preview rows)
-    keeps its place; new ids are appended. Best effort: any problem keeps what we have.
-    Returns (rows newest first, note) with note like "ugc+32/2p", "ugc_http403", "ugc_err:ValueError"."""
-    cap = REVIEW_CAP if cap is None else cap
-    goal = min(cap, want) if isinstance(want, int) and want > 0 else cap
-    rows = [r for r in (have or []) if r.get("id")][:cap]
-    seen = {r["id"] for r in rows}
-    if not hexid or len(rows) >= goal:
-        return _newest_first(rows), "ugc_skip"
-    tok, pages, added, note = "", 0, 0, None
-    while len(rows) < goal and pages < max_pages:
-        try:
-            status, body = fetch(ugc_path(hexid, tok, page))
-        except Exception as e:
-            note = f"ugc_err:{type(e).__name__}"; break
-        pages += 1
-        if status != 200:
-            note = f"ugc_http{status}"; break
-        try:
-            got, tok = parse_ugc(body)
-        except (ValueError, TypeError) as e:
-            note = f"ugc_err:{type(e).__name__}"; break
-        new = [r for r in got if r["id"] not in seen]
-        for r in new:
-            if len(rows) >= cap:
-                break
-            rows.append(r); seen.add(r["id"]); added += 1
-        if not new or not tok:
-            break
-    return _newest_first(rows), note or f"ugc+{added}/{pages}p"
 
 
 def about(p):

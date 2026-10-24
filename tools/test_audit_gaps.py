@@ -3,7 +3,8 @@ No network: safe_run talks to a fake Guard, Chrome / disk / sign-in are monkeypa
 
 Run: python tools/test_audit_gaps.py [repo-root]
 
-  #1083 reviews : AQD_MAX_REVIEWS (default 50), listugcposts paging (parse + stop rules), push cap + 422 -> 20 fallback
+  #1083 reviews : AQD_MAX_REVIEWS (default 50), no listugcposts left (DOM scrolling: tools/test_reviews_dom.py),
+                  push cap + 422 -> 20 fallback
   #1084 photos  : picked-but-0-sent is an error with backoff retry (photo_retry.json), push --photo-retry, give-up,
                   replay-photos dry run / --apply (skips places that already have server photos)
   #1085 disk    : AQD_MIN_FREE_GB guard in safe_run (exit 4 under AQD_ALT) and in both alt.py loops
@@ -120,12 +121,8 @@ def review_node(i, ts_us=None):
             [[5 - i % 5]] + [None] * 13 + [["vi"]] + [[[f"text {i}"]]]]
 
 
-def ugc_body(ids, token):
-    return ")]}'\n" + json.dumps([None, token, [[review_node(i)] for i in ids]])
-
-
 def test_reviews():
-    print("=== #1083 reviews: AQD_MAX_REVIEWS + listugcposts paging")
+    print("=== #1083 reviews: AQD_MAX_REVIEWS + Reviews-panel scrolling wired in (no listugcposts)")
     root = tempfile.mkdtemp(prefix="aqd-rv-")
     sr = fresh_import(root); mf = sr.mf; ge = sr.google_extras
     check("maps_fetch.REVIEW_CAP default", mf.REVIEW_CAP, 50)
@@ -136,42 +133,44 @@ def test_reviews():
     sr = fresh_import(root, AQD_MAX_REVIEWS="nonsense"); mf = sr.mf
     check("bad AQD_MAX_REVIEWS -> 50", mf.REVIEW_CAP, 50)
 
-    rows, tok = mf.parse_ugc(ugc_body([1, 2], "TOK"))
-    check("parse_ugc ids", [r["id"] for r in rows], ["rv1", "rv2"])
-    check("parse_ugc token", tok, "TOK")
-    check("parse_ugc author/rating/text", (rows[0]["author"], rows[0]["rating"], rows[0]["text"]), ("User 1", 4, "text 1"))
-    check("ugc_path carries hex id + token", "!1s0xabc:0xdef" in mf.ugc_path("0xabc:0xdef", "T1") and "!2sT1" in mf.ugc_path("0xabc:0xdef", "T1"), True)
+    # the dead listugcposts pager (always 403) is gone; reviews come from scrolling the panel (reviews_dom.py)
+    for name in ("ugc_path", "parse_ugc", "more_reviews", "UGC_PAGE", "UGC_MAX_PAGES"):
+        check_true(f"maps_fetch.{name} removed", not hasattr(mf, name))
+    check_true("safe_run._browser_get removed", not hasattr(sr, "_browser_get"))
+    for f in ("common/safe_run.py", "common/maps_fetch.py"):
+        check_true(f"no listugcposts / batchexecute in {f}",
+                   not any(w in open(os.path.join(ROOT, f), encoding="utf-8").read() for w in ("listugcposts", "batchexecute")))
 
-    preview = [mf.review_row(review_node(i)) for i in range(1, 6)]          # 5 from the preview
-    pages = {"": (list(range(1, 21)), "t1"), "t1": (list(range(21, 41)), "t2"), "t2": (list(range(41, 61)), "t3")}
-    seen = []
+    sr = fresh_import(root); mf = sr.mf
+    import reviews_dom as rd
+    preview = [mf.review_row(review_node(i)) for i in range(1, 6)]
+    seen = {}
 
-    def fetch(path):
-        tok = path.split("!2s", 1)[1].split("!", 1)[0]
-        seen.append(tok)
-        ids, nxt = pages[tok]
-        return 200, ugc_body(ids, nxt)
-    got, note = mf.more_reviews(fetch, "0xabc:0xdef", preview, cap=50)
-    check("paging stops at cap 50", len(got), 50)
-    check("no duplicate ids", len({r["id"] for r in got}), 50)
-    check("3 pages read (20+20+15 new)", seen, ["", "t1", "t2"])
-    check("note", note, "ugc+45/3p")
+    class FakeDriver:
+        def __init__(self, pg, url):
+            seen["pg"], seen["url"] = pg, url
+    orig = (rd.PageDriver, rd.page_reviews)
+    rd.PageDriver = FakeDriver
+    rd.page_reviews = lambda drv, have, cap, want=None: (have + [{"id": "dom1"}], f"dom+1/1s cap={cap} want={want}")
+    sr._PW["pg"] = "PAGE"
+    info = {"_meta": {"place_id": "ChIJtest", "hex_id": "0xa:0xb", "extra": {"reviews": list(preview), "google_review_count": 12}}}
+    try:
+        quiet(sr._more_reviews, info)
+        ex = info["_meta"]["extra"]
+        check("_more_reviews uses the crawler's own tab", seen.get("pg"), "PAGE")
+        check("_more_reviews opens the place by place_id", seen.get("url"), "https://www.google.com/maps/place/?q=place_id:ChIJtest&hl=vi")
+        check("_more_reviews passes cap + Google count", ex["reviews_paging"], "dom+1/1s cap=50 want=12")
+        check("_more_reviews stores rows", len(ex["reviews"]), 6)
 
-    seen.clear()
-    pages2 = {"": (list(range(1, 21)), "t1"), "t1": (list(range(21, 33)), None)}
-    got, note = mf.more_reviews(lambda p: (200, ugc_body(*pages2[p.split("!2s", 1)[1].split("!", 1)[0]])), "0xa", preview, cap=50)
-    check("source runs out (no token) -> 32 kept", len(got), 32)
-    seen.clear()
-    got, note = mf.more_reviews(fetch, "0xa", preview, cap=50, want=5)
-    check("Google count 5 = preview already has all -> no request", (len(got), seen, note), (5, [], "ugc_skip"))
-    got, note = mf.more_reviews(fetch, "0xa", preview, cap=50, want=12)
-    check("Google count 12 -> one page only", seen, [""])
-    got, note = mf.more_reviews(lambda p: (403, "denied"), "0xa", preview, cap=50)
-    check("signed-out 403 keeps the preview", (len(got), note), (5, "ugc_http403"))
-    got, note = mf.more_reviews(lambda p: (200, "<html>"), "0xa", preview, cap=50)
-    check("garbage body keeps the preview", (len(got), note.startswith("ugc_err")), (5, True))
-    got, note = mf.more_reviews(fetch, None, preview, cap=50)
-    check("no hex id -> no request", note, "ugc_skip")
+        def boom(*a, **k):
+            raise RuntimeError("x")
+        rd.page_reviews = boom
+        info["_meta"]["extra"]["reviews"] = list(preview)
+        quiet(sr._more_reviews, info)
+        check("driver error keeps the preview", (len(ex["reviews"]), ex["reviews_paging"]), (5, "dom_err:RuntimeError"))
+    finally:
+        rd.PageDriver, rd.page_reviews = orig
+        sr._PW.pop("pg", None)
 
     # push: 50 rows go out; a server still at 20 answers 422 -> one retry with the newest 20, then 20 directly
     sr = fresh_import(root); ge = sr.google_extras
