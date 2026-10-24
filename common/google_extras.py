@@ -1,18 +1,35 @@
 """Push the Google extras kept in extra.json to the /v1 admin API (#679 About, #680 reviews, #685 hours).
 
   PATCH /v1/admin/restaurants/:id               {google_attributes:[{group,label,items:[{id,label,value:bool}]}], description}
-  PUT   /v1/admin/restaurants/:id/google_reviews {google_rating, google_review_count, rating_histogram, reviews[<=20]}
+  PUT   /v1/admin/restaurants/:id/google_reviews {google_rating, google_review_count, rating_histogram, reviews[<=AQD_MAX_REVIEWS]}
   PUT   /v1/admin/restaurants/:id/opening_hours  {source:"google", periods:[{weekday 0=Mon, open, close}], closed_days,
                                                   is_24h_days, raw_text}; 409 opening_hours_owner_confirmed -> skip
 Payloads mirror the server validators (app/services/google_attributes/validate.rb, google_reviews/validate.rb,
 opening_hours/replace_week.rb) so a bad item is dropped here instead of failing the whole request."""
+import os
 import re
 from urllib.parse import urlparse
 
 API = "/v1/admin/restaurants"
 KEY_RE = re.compile(r"\A[a-z0-9_]{1,64}\Z")
 MAX_GROUPS, MAX_ITEMS, MAX_LABEL = 20, 60, 120
-MAX_REVIEWS, MAX_PHOTOS = 20, 5
+MAX_PHOTOS = 5
+
+
+def _env_int(name, default):
+    try:
+        return max(1, int(os.environ.get(name, "") or default))
+    except ValueError:
+        return default
+
+
+# an_uong_quanh_day#1083: up to AQD_MAX_REVIEWS (default 50) reviews per place. The server validator capped the PUT at 20
+# (google_reviews/validate.rb MAX_REVIEWS) until the web change ships; a 422 for a longer list is retried once with the
+# newest LEGACY_SERVER_MAX rows and the process remembers the old cap, so nothing breaks before the deploy.
+MAX_REVIEWS = _env_int("AQD_MAX_REVIEWS", 50)
+PUSH_MAX = _env_int("AQD_GOOGLE_REVIEWS_PUSH_MAX", MAX_REVIEWS)
+LEGACY_SERVER_MAX = 20
+_server_cap = [None]
 
 
 def server_key(raw):
@@ -65,7 +82,8 @@ def _int(v):
     return v if isinstance(v, int) and not isinstance(v, bool) else (int(v) if isinstance(v, str) and v.isdigit() else None)
 
 
-def reviews_payload(ex):
+def reviews_payload(ex, cap=None):
+    cap = MAX_REVIEWS if cap is None else cap
     body = {}
     r = ex.get("google_rating")
     if isinstance(r, (int, float)) and not isinstance(r, bool) and 1 <= r <= 5:
@@ -78,7 +96,7 @@ def reviews_payload(ex):
         body["rating_histogram"] = {k: _int(h[k]) for k in "12345"}
     rows, seen = [], set()
     for rv in ex.get("reviews") or []:
-        if len(rows) >= MAX_REVIEWS:
+        if len(rows) >= cap:
             break
         rid, rating = rv.get("id"), _int(rv.get("rating"))
         if not isinstance(rid, str) or not rid or rid in seen or rating is None or not 1 <= rating <= 5:
@@ -155,10 +173,18 @@ def push(req, rid, ex, current=None, api_error=Exception):
         except api_error as e:
             if getattr(e, "status", 500) >= 500 or getattr(e, "status", 0) == 429: raise
             parts.append(f"about_fail={code(e)}")
-    rb = reviews_payload(ex)
+    rb = reviews_payload(ex, cap=min(PUSH_MAX, _server_cap[0] or PUSH_MAX))
     if rb.get("reviews") or "google_rating" in rb:
         try:
-            got = req("PUT", f"{API}/{rid}/google_reviews", json_body=rb)
+            try:
+                got = req("PUT", f"{API}/{rid}/google_reviews", json_body=rb)
+            except api_error as e:
+                if getattr(e, "status", 0) != 422 or len(rb["reviews"]) <= LEGACY_SERVER_MAX: raise
+                # the server still caps at 20 (too_many_reviews): send the newest 20 and keep that cap for this process
+                _server_cap[0] = LEGACY_SERVER_MAX
+                rb = dict(rb, reviews=rb["reviews"][:LEGACY_SERVER_MAX])
+                got = req("PUT", f"{API}/{rid}/google_reviews", json_body=rb)
+                parts.append(f"reviews_cap={LEGACY_SERVER_MAX}(server 422)")
             parts.append(f"reviews={len((got or {}).get('reviews') or [])}/{len(rb['reviews'])}")
         except api_error as e:
             if getattr(e, "status", 500) >= 500 or getattr(e, "status", 0) == 429: raise

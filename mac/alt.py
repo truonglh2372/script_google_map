@@ -135,6 +135,35 @@ def stopall(): return os.path.exists(R + "/STOP_ALL")
 def until(f): return float(open(f, encoding="utf-8").read()) if os.path.exists(f) else 0
 
 
+def env_num(name, default):
+    try: return float(os.environ.get(name, "") or default)
+    except ValueError: return default
+
+
+MIN_FREE_GB = env_num("AQD_MIN_FREE_GB", 5)          # an_uong_quanh_day#1085
+DISK_PAUSE_MIN = env_num("AQD_DISK_PAUSE_MIN", 10)
+EXIT_DISK, EXIT_SIGNED_OUT, SIGNED_OUT_PAUSE = 4, 5, 1800
+
+
+def disk_free_gb(path=None):
+    try: return __import__("shutil").disk_usage(path or R).free / 1e9
+    except OSError: return None
+
+
+def disk_low(free, min_gb=None):
+    """True when `free` GB is known and below AQD_MIN_FREE_GB (0 disables the guard)."""
+    min_gb = MIN_FREE_GB if min_gb is None else min_gb
+    return min_gb > 0 and free is not None and free < min_gb
+
+
+def photo_retry_due(path, now=None):
+    """Ids in photo_retry.json (safe_run, #1084) whose next photo retry is due."""
+    now = time.time() if now is None else now
+    d = read_json(path, {})
+    return sorted(int(k) for k, e in d.items() if k.isdigit() and isinstance(e, dict) and e.get("state") == "retry"
+                  and float(e.get("next_at") or 0) <= now)
+
+
 def beat(activity, **kw):
     """Crawler heartbeat (an_uong_quanh_day#1021): at most one per AQD_HEARTBEAT_EVERY_MIN, no-op without
     AQD_INGEST_TOKEN; best effort, never stops the loop."""
@@ -170,7 +199,24 @@ else:
 MAX_PAGES = list_max_pages(os.environ.get("AQD_LIST_MAX_PAGES"))
 FETCH_LIMIT = fetch_limit(os.environ.get("AQD_FETCH_LIMIT"))
 say(f"config: queue={os.path.basename(MINE)} list_max_pages={MAX_PAGES or 'all'} fetch_limit={FETCH_LIMIT or 'none'}")
+def pause_blocked(sec, activity):
+    end = time.time() + sec
+    while time.time() < end and not stopall(): beat(activity, status="blocked"); time.sleep(10)
+
+
 while not stopall():
+    _free = disk_free_gb()
+    if disk_low(_free):
+        say(f"DISK LOW {_free:.1f} GB free < {MIN_FREE_GB:g} GB; pause {DISK_PAUSE_MIN:g} min (no fetch/push)")
+        beat(f"tạm ngừng: ổ đĩa còn {_free:.1f} GB", status="blocked", force=True)
+        pause_blocked(DISK_PAUSE_MIN * 60, f"ổ đĩa còn {_free:.1f} GB"); continue
+    _due = photo_retry_due(R + "/photo_retry.json")
+    if _due:
+        say(f"PHOTO RETRY: {len(_due)} places with picked-but-unsent photos are due (#1084)")
+        rc = run(["push", "--photo-retry", "--ignore-peak"])
+        if stopall(): break
+        if rc == EXIT_DISK: continue
+        if rc != 0: say(f"photo retry rc={rc}; go on")
     if time.time() < until(R + "/fetch_backoff.txt"):
         say(f"fetch backoff; sleep {int(until(R + '/fetch_backoff.txt') - time.time())}s"); nap(until(R + "/fetch_backoff.txt") - time.time()); continue
     pf = R + "/refetch_priority.txt"
@@ -220,6 +266,10 @@ while not stopall():
     rc = run(["run", "--ignore-peak", "--sleep", "0", "--floor", "0", "--queue", MINE, "--limit", str(FETCH_LIMIT)])
     if stopall(): break
     if rc == 3: say("Google limited -> backoff (kept)")
+    elif rc == EXIT_DISK: say("disk low -> pause (checked at the top of the loop)")
+    elif rc == EXIT_SIGNED_OUT:
+        say("Chrome is NOT signed in to Google -> no fetch (thin data is never validated); sign in, re-check in 30 min")
+        pause_blocked(SIGNED_OUT_PAUSE, "Chrome chưa đăng nhập Google")
     elif rc != 0: say(f"fetcher rc={rc}; retry in 60s"); nap(60)
     else: say("pass done; re-list")
 say("fetcher loop stopped (STOP_ALL)")
