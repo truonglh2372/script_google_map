@@ -28,6 +28,14 @@ Khi có `AQD_YES=1`, installer chạy hết **không hỏi gì**:
 
 Muốn đổi giá trị thì đặt biến môi trường cùng tên trước lệnh, ví dụ `AQD_ID_SUFFIXES="1 3"`, `AQD_PARITY=odd`, `AQD_ADMIN_EMAIL=...` hoặc `AQD_ADMIN_PASSWORD=...` (dùng khi máy mới chưa có `creds.env`). Bỏ `AQD_YES` thì installer quay về chế độ hỏi từng câu như mô tả bên dưới. Lưu ý: GitHub raw có thể trễ tới khoảng 5 phút sau khi push.
 
+## Heartbeat cho báo cáo Slack hằng ngày (an_uong_quanh_day#1021)
+`common/heartbeat.py` gửi `POST {AQD_BASE}/v1/ingest/heartbeats` để báo cáo Slack 08:00 biết máy này còn chạy, đã làm được bao nhiêu và gặp vấn đề gì.
+- **Bật:** thêm một dòng `AQD_INGEST_TOKEN=<token>` vào `creds.env` (installer giữ nguyên `creds.env`). Token lấy ở Admin → Ingest clients (`/admin/ingest_clients`), **mỗi máy một token**; token chỉ hiện một lần, không bao giờ được in ra log. Không có token thì heartbeat không làm gì cả.
+- **Gửi gì:** tên crawler `script_google_map`, tên máy (`CRAWLER_HOSTNAME` hoặc hostname), việc đang làm, số quán xong / ảnh đã đẩy / lỗi **kể từ heartbeat trước**, chỗ trống ổ đĩa, và vấn đề (`ip_blocked` khi Maps chặn, `rate_limited` khi Maps trả trang rỗng/giới hạn, `disk_full` khi còn dưới 1 GB). Không gửi mật khẩu, cookie hay URL có token.
+- **Khi nào:** sau mỗi quán (`safe_run.py`) và trong lúc `alt.py` nghỉ, nhưng tối đa 1 lần mỗi `AQD_HEARTBEAT_EVERY_MIN` phút (mặc định 15); gửi ngay khi bị chặn hoặc dừng.
+- Số đếm cộng dồn trong `heartbeat_state.json`; gửi lỗi thì giữ lại và gửi lại đúng body + `Idempotency-Key` cũ, nên server không đếm hai lần. Lỗi heartbeat không bao giờ làm dừng crawler. `AQD_HEARTBEAT=0` để tắt.
+- Test offline (không gọi mạng): `python3 tools/test_heartbeat.py`.
+
 ## Dữ liệu Google thêm (từ 17/10/2026)
 Khi fetch một quán, `maps_fetch.py` lấy thêm các dữ liệu dưới đây, **không tốn thêm request nào tới Google** (đọc ngay từ JSON preview vốn đã tải):
 - **Đánh giá:** `google_rating`, `google_review_count`, phân bố 1–5 sao, và tối đa **20** đánh giá có sẵn trong preview. Mỗi đánh giá gồm tên hiển thị của người viết (chỉ tên, không lưu id hay avatar), số sao, nội dung, ngày đăng và ảnh kèm theo. Ảnh chỉ được giữ khi CLIP xếp là `food` / `drink`, tối đa 12 ảnh mỗi quán (`AQD_REVIEW_PHOTO_CAP`) và chỉ lưu URL.

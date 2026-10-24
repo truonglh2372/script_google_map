@@ -89,6 +89,21 @@ def log(s):
     open(LOG, "a", encoding="utf-8").write(line + "\n"); print(line, flush=True)
 
 
+try:  # crawler heartbeat for the daily Slack ops report (an_uong_quanh_day#1021); no AQD_INGEST_TOKEN -> no-op
+    import heartbeat as _heartbeat
+    HB = _heartbeat.Heartbeat("script_google_map", ROOT)
+except Exception:  # an old install without heartbeat.py keeps working
+    HB = None
+
+
+def hb(method, *args, **kwargs):
+    """Best effort: a heartbeat problem never stops a pass and is never logged with the token."""
+    try:
+        return getattr(HB, method)(*args, **kwargs) if HB else None
+    except Exception:
+        return None
+
+
 class Overload(Exception):
     pass
 
@@ -473,6 +488,8 @@ def cmd_push(args):
                 tries += 1
                 log(f"#{rid} OVERLOAD ({e}) try {tries}")
                 if tries >= 2:
+                    hb("record_place", False); hb("note", "other", f"server overload: {str(e)[:150]}")
+                    hb("beat", f"#{rid} STOP: server overload", status="error", force=True)
                     log(f"#{rid} second failure -> STOP ENTIRELY"); open(PROG, "a", encoding="utf-8").write(f"{rid} | safe | STOPPED overload: {e}\n"); open(STOPFILE, "w", encoding="utf-8").write(str(e)); return "STOP"
                 time.sleep(COOLDOWN)
             except Exception as e:
@@ -483,6 +500,7 @@ def cmd_push(args):
         info = json.load(open(os.path.join(DATA_DIR, str(rid), "info.json"), encoding="utf-8"))
         line = f"{rid} | safe | {info.get('name','')} | {info.get('category')} | {kind.upper()} {msg} - {time.strftime('%F %H:%M')}"
         open(PROG, "a", encoding="utf-8").write(line + "\n"); log(f"#{rid} {kind.upper()} {msg}")
+        hb("record_result", kind, msg); hb("beat", f"#{rid} {kind}")
         if n % 20 == 0:
             log(f"health: reqs={G.n} avg={G.tt/max(1,G.n):.2f}s max={G.max:.1f}s"); time.sleep(30)
     if len(ids) > 1: log(f"PUSH END {n} places; reqs={G.n} avg={G.tt/max(1,G.n):.2f}s max={G.max:.1f}s")
@@ -632,6 +650,8 @@ def cmd_run(args):
                 info, reason = build_info(r)
             except mf.Blocked as e:
                 log(f"#{rid} Maps BLOCKED {e}; back off 2h")
+                hb("note", "ip_blocked", f"Maps BLOCKED: {str(e)[:150]}")
+                hb("beat", "Maps BLOCKED, back off 2h", status="error", force=True)
                 if os.environ.get("AQD_ALT"):
                     open(ROOT + "/fetch_backoff.txt", "w", encoding="utf-8").write(str(time.time() + 7200)); sys.exit(3)
                 time.sleep(7200); continue
@@ -645,6 +665,8 @@ def cmd_run(args):
                     if streak >= 3:
                         m = BACKOFF_MIN[min(level, 2)]; level += 1
                         log(f"Maps empty page {streak} in a row (last #{rid}); pause Maps {m} min (level {level})")
+                        hb("note", "rate_limited", f"Maps empty page {streak} in a row; pause {m} min")
+                        hb("beat", f"Maps paused {m} min", status="degraded", force=True)
                         if os.environ.get("AQD_ALT"):
                             open(ROOT + "/fetch_backoff.txt", "w", encoding="utf-8").write(str(time.time() + m * 60)); sys.exit(3)
                         if not nap(m * 60): log("STOP file; end run"); break
@@ -672,6 +694,8 @@ def cmd_run(args):
         if fetched and streak >= 3:
             m = BACKOFF_MIN[min(level, 2)]; level += 1
             log(f"Maps truly limited {streak} in a row (last #{rid}: {lim}); pause Maps {m} min (level {level})")
+            hb("note", "rate_limited", f"Maps limited {streak} in a row; pause {m} min")
+            hb("beat", f"Maps paused {m} min", status="degraded", force=True)
             if os.environ.get("AQD_ALT"):
                 open(ROOT + "/fetch_backoff.txt", "w", encoding="utf-8").write(str(time.time() + m * 60)); sys.exit(3)
             if not nap(m * 60): log("STOP file; end run"); break
