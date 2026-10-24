@@ -217,7 +217,7 @@ def test_static():
           rd.place_url({"google_maps_url": "https://www.google.com/maps/search/?api=1&query=a"}),
           "https://www.google.com/maps/search/?api=1&query=a&hl=vi")
     check("no url -> empty", rd.place_url({}), "")
-    for name in ("tablist.html", "sort_button.html", "sort_menu.html"):
+    for name in ("tablist.html", "sort_button.html", "sort_menu.html", "overview_stale.html"):
         check(f"fixture {name} present", os.path.getsize(os.path.join(FX, name)) > 0, True)
     check("tab label matches the driver's selector", "Bài đánh giá" in fx("tablist.html"), True)
     import unicodedata
@@ -300,8 +300,45 @@ def test_sort_pick():
     check("verified sort -> no unsorted flag", note, "dom+22/2s")
 
 
+def test_sort_position():
+    print("=== (a2) sort button position / Admin race (overview cards still in the DOM)")
+    adm = fx("sort_area_admin.html")
+    b = rd.pick_sort_button(rd.parse_html(C10 + adm))
+    check("sort button rendered AFTER the first review card -> still found (FNe70d)", b is not None and b.cls(), ["FNe70d"])
+    check("... also in strict mode (what the driver waits for)", rd.pick_sort_button(rd.parse_html(C10 + adm), strict=True).cls(), ["FNe70d"])
+    en = adm.replace("Phù hợp nhất", "Most relevant").replace('class="FNe70d"', 'class="Zz9"')
+    check("after the cards, English label, renamed class -> by label", rd.pick_sort_button(rd.parse_html(C10 + en)).cls(), ["Zz9"])
+    xx = adm.replace("Phù hợp nhất", "Najbardziej trafne").replace('class="FNe70d"', 'class="Zz9"')
+    check("fallback never picks a popup button AFTER the cards", rd.pick_sort_button(rd.parse_html(C10 + xx)), None)
+    above = '<button class="Up1" aria-haspopup="true" aria-expanded="false" aria-label="Najbardziej trafne">x</button>'
+    check("fallback: the button above the cards, not a closer one below",
+          rd.pick_sort_button(rd.parse_html(above + C10 + xx)).cls(), ["Up1"])
+    check("fallback is off in strict mode", rd.pick_sort_button(rd.parse_html(above + C10), strict=True), None)
+    check("no cards -> no positional fallback", rd.pick_sort_button(rd.parse_html(xx)), None)
+    ov = fx("overview_stale.html")
+    check("observed stale Overview (preview cards, no sort button): nothing picked, no decoy",
+          (rd.pick_sort_button(rd.parse_html(ov)), rd.pick_sort_button(rd.parse_html(ov), strict=True)), (None, None))
+    check("stale Overview has preview cards (why 'a card exists' is not 'panel ready')", len(rd.parse_cards(ov)), 3)
+    check("after the swap: Reviews panel -> FNe70d", rd.pick_sort_button(rd.parse_html(adm + C10)).cls(), ["FNe70d"])
+    print("=== no_btn diagnostics")
+    r = rd.no_btn_reason({"pop": 4, "above": 3, "below": 1, "incard": 0, "fne": 0, "cards": 3, "lang": "vi-RU", "list": []})
+    check("format", r, "no_btn:pop4-above3-below1-incard0-fne0-cards3")
+    check("empty / failed diag", rd.no_btn_reason(None), "no_btn:pop0-above0-below0-incard0-fne0-cards0")
+    check("log-safe (no comma, parens, spaces)", [ch for ch in r if ch in ",() "], [])
+    zero = dict(wait=(0, 0), rand=lambda a, b: a)
+    rows, note = rd.page_reviews(FakeDriver(sort=r), PREVIEW, cap=50, want=30, **zero)
+    line = f"reviews {len(PREVIEW)} -> {len(rows)} ({note})"
+    m = re.search(r"reviews (\d+) -> (\d+) \((.*)\)$", line)
+    check("review line still parses (verifier regex) and keeps the reason",
+          (bool(m), m and m.group(3).split(",unsorted")[1]), (True, ":" + r))
+    for js in ("_JS_SORT_BTN", "_JS_SORT_READY", "_JS_APPLIED"):
+        check(f"{js}: one shared finder (label/class anywhere, position only in the fallback)",
+              "if(hit||strict||!c) return hit;" in getattr(rd, js), True)
+    check("driver waits for a strict match before giving up", "_JS_SORT_READY" in open(os.path.join(ROOT, "common", "reviews_dom.py"), encoding="utf-8").read().split("def sort_newest")[1].split("def cards_html")[0], True)
+
+
 def main():
-    test_parse(); test_expand(); test_merge(); test_stop(); test_skip0(); test_sort_pick(); test_static()
+    test_parse(); test_expand(); test_merge(); test_stop(); test_skip0(); test_sort_pick(); test_sort_position(); test_static()
     print()
     if FAILURES:
         print(f"{len(FAILURES)} FAILED: {FAILURES}")

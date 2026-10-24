@@ -39,30 +39,47 @@ def fx(name):
 CARDS = re.findall(r'<div class="jftiEf[^"]*"[^>]*data-review-id=.*?(?=<div class="jftiEf|\Z)', fx("cards_initial_collapsed.html"), re.S)
 
 
-def page(header, menu, delay_ms=0, trusted_only=False, applies=True):
-    """header = HTML holding the sort button (its first aria-haspopup button with the sort class/label is wired),
-    menu = the menu HTML (hidden until the sort button is clicked)."""
+_SCRIPT = """
+const PANEL = __PANEL__, STALE = __STALE__, SWAP = __SWAP__, DELAY = __DELAY__, TRUSTED = __TRUSTED__, APPLIES = __APPLIES__;
+let SORTBTN = null; window.OPENS = 0; window.PICKED = null; window.DECOY = 0;
+document.addEventListener('click', e => { const b = e.target.closest('button[aria-haspopup]');
+  if (b && b !== SORTBTN && !b.closest('#menu')) window.DECOY++; }, true);
+function wire() {
+  SORTBTN = [...document.querySelectorAll('#hdr button[aria-haspopup=true]')].pop() || null;   // the last popup = sort
+  if (!SORTBTN) return;
+  SORTBTN.addEventListener('click', e => { if (TRUSTED && !e.isTrusted) return; window.OPENS++;
+    setTimeout(() => { document.getElementById('menu').style.display = 'block' }, DELAY); });
+}
+document.querySelectorAll('#menu [role=menuitemradio]').forEach(i => i.addEventListener('click', e => {
+  if (TRUSTED && !e.isTrusted) return;
+  window.PICKED = i.getAttribute('data-index') || i.textContent.trim(); document.getElementById('menu').style.display = 'none';
+  if (APPLIES && SORTBTN) { const t = i.textContent.trim(); SORTBTN.setAttribute('aria-label', t); SORTBTN.firstElementChild.textContent = t; } }));
+document.addEventListener('keydown', e => { if (e.key === 'Escape') document.getElementById('menu').style.display = 'none'; });
+if (STALE) setTimeout(() => { document.getElementById('panel').innerHTML = PANEL; wire(); }, SWAP); else wire();
+"""
+
+
+def page(header, menu, delay_ms=0, trusted_only=False, applies=True, hdr_after=False, stale=None, swap_ms=0):
+    """header = HTML holding the sort button (its last aria-haspopup=true button is wired as the sort button),
+    menu = the menu HTML (hidden until the sort button is clicked). hdr_after: the header is rendered AFTER the review
+    cards. stale: HTML shown first (the old Overview with its preview cards, as observed on Admin) and replaced by the
+    real panel after swap_ms."""
+    hdr = f"<div id=hdr>{header}</div>"
+    feed = f"<div id=feed style=\"height:300px;overflow-y:auto\">{''.join(CARDS)}</div>"
+    panel = feed + hdr if hdr_after else hdr + feed
+    js = (_SCRIPT.replace("__PANEL__", json.dumps(panel)).replace("__STALE__", "true" if stale else "false")
+          .replace("__SWAP__", str(int(swap_ms))).replace("__DELAY__", str(int(delay_ms)))
+          .replace("__TRUSTED__", str(trusted_only).lower()).replace("__APPLIES__", str(applies).lower()))
     return f"""<html lang="vi-RU"><body style="width:929px">
-<div id=hdr>{header}</div><div id=menu style="display:none;position:absolute;top:80px;left:20px;background:#fff">{menu}</div>
-<div id=feed style="height:300px;overflow-y:auto">{''.join(CARDS)}</div>
-<script>
-const SORTBTN = [...document.querySelectorAll('#hdr button[aria-haspopup=true]')].pop();   // the last popup = sort
-window.OPENS = 0; window.PICKED = null; window.DECOY = 0;
-document.querySelectorAll('#hdr button').forEach(b=>{{ if(b!==SORTBTN) b.addEventListener('click', ()=>window.DECOY++); }});
-SORTBTN.addEventListener('click', e=>{{ if({str(trusted_only).lower()} && !e.isTrusted) return; window.OPENS++;
-  setTimeout(()=>{{document.getElementById('menu').style.display='block'}}, {delay_ms}); }});
-document.querySelectorAll('#menu [role=menuitemradio]').forEach(i=>i.addEventListener('click', e=>{{
-  if({str(trusted_only).lower()} && !e.isTrusted) return;
-  window.PICKED = i.getAttribute('data-index') || i.textContent.trim(); document.getElementById('menu').style.display='none';
-  if({str(applies).lower()}) {{ const t=i.textContent.trim(); SORTBTN.setAttribute('aria-label', t); SORTBTN.firstElementChild.textContent=t; }} }}));
-document.addEventListener('keydown', e=>{{ if(e.key==='Escape') document.getElementById('menu').style.display='none'; }});
-</script></body></html>"""
+<div id=menu style="display:none;position:absolute;top:80px;left:20px;background:#fff">{menu}</div>
+<div id=panel>{stale if stale else panel}</div>
+<script>{js}</script></body></html>"""
 
 
-def old_module():
-    """reviews_dom.py as on origin/main before this change (for the before/after proof); None if unavailable."""
+def old_module(rev="804e9db"):
+    """reviews_dom.py at an older commit (for the before/after proofs); None if unavailable."""
     try:
-        src = subprocess.run(["git", "-C", ROOT, "show", "804e9db:common/reviews_dom.py"], capture_output=True, text=True,
+        src = subprocess.run(["git", "-C", ROOT, "show", f"{rev}:common/reviews_dom.py"], capture_output=True, text=True,
                              encoding="utf-8", check=True).stdout
     except Exception:
         return None
@@ -86,6 +103,7 @@ def main():
     xx_menu = re.sub(r'data-index="(\d)"', r'data-index="x\1"', unicodedata.normalize("NFC", fx("sort_menu.html"))
                      .replace("Phù hợp nhất", "Najbardziej trafne").replace("Mới nhất", "Najnowsze"))
     newest_hdr = mac_hdr.replace("Phù hợp nhất", "Mới nhất")
+    stale_ov = fx("overview_stale.html")
     cases = [  # name, html, expected sort_newest(), expected picked item
         ("Mac panel, instant menu", page(mac_hdr, nfd), True, "1"),
         ("Admin panel: decoys first, menu after 2.5 s, no role=menu, NFD", page(admin_hdr, no_wrap, delay_ms=2500), True, "1"),
@@ -95,7 +113,14 @@ def main():
         ("already newest: no click", page(newest_hdr, nfd), True, None),
         ("click does not apply -> not_applied", page(admin_hdr, nfd, applies=False), "not_applied", "1"),
         ("menu never opens -> no_menu", page(admin_hdr, "<div></div>"), "no_menu", None),
-        ("no sort button -> no_btn", page('<button class="pUmuib">Tìm hiểu thêm</button>', nfd), "no_btn", None),
+        ("no sort button -> no_btn + diagnostics", page('<button class="pUmuib">Tìm hiểu thêm</button>', nfd),
+         "no_btn:pop0-above0-below0-incard0-fne0-cards10", None),
+        ("sort button rendered AFTER the first review card", page(admin_hdr, nfd, hdr_after=True), True, "1"),
+        ("after the cards, English label + renamed class", page(en_hdr, en_menu, hdr_after=True), True, "x1"),
+        ("after the cards, unknown language: fallback refuses (never below the cards)",
+         page(xx_hdr, xx_menu, hdr_after=True), "no_btn:pop2-above0-below2-incard0-fne0-cards10", None),
+        ("Admin race: stale Overview (preview cards, decoys) for 1.2 s, then the panel",
+         page(admin_hdr, no_wrap, stale=stale_ov, swap_ms=1200), True, "1"),
     ]
     old = old_module()
     tmp = tempfile.mkdtemp(prefix="aqd_sort_pw_")
@@ -130,6 +155,24 @@ def main():
             pg.goto("file://" + f)
             nd = rd.PageDriver(pg, "file://" + f); nd.pause = lambda s: pg.wait_for_timeout(int(s * 100))
             check("new code -> sorted on the same panel", nd.sort_newest(), True)
+        old22 = old_module("9583dd8")
+        if old22 is not None:
+            print("=== before/after on the observed Admin race (stale Overview for 1.2 s)")
+            f = os.path.join(tmp, "race.html"); open(f, "w", encoding="utf-8").write(page(admin_hdr, no_wrap, stale=stale_ov, swap_ms=1200))
+            pg.goto("file://" + f)
+            od = old22.PageDriver(pg, "file://" + f); od.pause = lambda s: pg.wait_for_timeout(int(s * 1000))
+            check("main 9583dd8 (#22) -> no_btn on the race (what Admin logged)", od.sort_newest(), "no_btn")
+            check("... and it clicked no decoy", pg.evaluate("window.DECOY"), 0)
+            pg.goto("file://" + f)
+            nd = rd.PageDriver(pg, "file://" + f); nd.pause = lambda s: pg.wait_for_timeout(int(s * 100))
+            check("new code -> sorted on the same race", nd.sort_newest(), True)
+            print("=== full page_reviews through the race")
+            d = rd.PageDriver(pg, "file://" + f)
+            d.open_reviews = lambda: (pg.goto("file://" + f), pg.wait_for_selector("div.jftiEf[data-review-id]"), True)[2]
+            d.pause = lambda s: pg.wait_for_timeout(int(s * 100))
+            rows, note = rd.page_reviews(d, [], cap=10, want=10, rating=4.5, wait=(0.1, 0.2))
+            check("race: note says sorted", ("unsorted" in note, note.startswith("dom+")), (False, True))
+            check("race: panel rows read, no stale overview ids", (len(rows), any(r["id"].startswith("OV_") for r in rows)), (10, False))
         print("=== full page_reviews on the Admin-like panel")
         f = os.path.join(tmp, "full.html"); open(f, "w", encoding="utf-8").write(page(admin_hdr, no_wrap, delay_ms=1200))
         d = rd.PageDriver(pg, "file://" + f)
