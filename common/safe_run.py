@@ -485,7 +485,8 @@ def _more_reviews(info):
     have = ex.get("reviews") or []
     try:
         drv = rd.PageDriver(_PW["pg"], rd.place_url(info, meta.get("hex_id")))
-        rows, note = rd.page_reviews(drv, have, cap=mf.REVIEW_CAP, want=ex.get("google_review_count"))
+        rows, note = rd.page_reviews(drv, have, cap=mf.REVIEW_CAP, want=ex.get("google_review_count"),
+                                     rating=ex.get("google_rating"))
         ex["reviews"] = rows
     except Exception as e:
         note = f"dom_err:{type(e).__name__}"

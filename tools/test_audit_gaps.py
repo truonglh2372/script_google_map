@@ -151,15 +151,15 @@ def test_reviews():
             seen["pg"], seen["url"] = pg, url
     orig = (rd.PageDriver, rd.page_reviews)
     rd.PageDriver = FakeDriver
-    rd.page_reviews = lambda drv, have, cap, want=None: (have + [{"id": "dom1"}], f"dom+1/1s cap={cap} want={want}")
+    rd.page_reviews = lambda drv, have, cap, want=None, rating=None: (have + [{"id": "dom1"}], f"dom+1/1s cap={cap} want={want} rating={rating}")
     sr._PW["pg"] = "PAGE"
-    info = {"_meta": {"place_id": "ChIJtest", "hex_id": "0xa:0xb", "extra": {"reviews": list(preview), "google_review_count": 12}}}
+    info = {"_meta": {"place_id": "ChIJtest", "hex_id": "0xa:0xb", "extra": {"reviews": list(preview), "google_review_count": 12, "google_rating": 4.4}}}
     try:
         quiet(sr._more_reviews, info)
         ex = info["_meta"]["extra"]
         check("_more_reviews uses the crawler's own tab", seen.get("pg"), "PAGE")
         check("_more_reviews opens the place by place_id", seen.get("url"), "https://www.google.com/maps/place/?q=place_id:ChIJtest&hl=vi")
-        check("_more_reviews passes cap + Google count", ex["reviews_paging"], "dom+1/1s cap=50 want=12")
+        check("_more_reviews passes cap + Google count + rating", ex["reviews_paging"], "dom+1/1s cap=50 want=12 rating=4.4")
         check("_more_reviews stores rows", len(ex["reviews"]), 6)
 
         def boom(*a, **k):

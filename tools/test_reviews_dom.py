@@ -57,7 +57,7 @@ class FakeDriver:
 
     def sort_newest(self):
         self.calls.append("sort")
-        return self.sort
+        return self.sort      # True, False, or a reason string like the real PageDriver
 
     def pause(self, s):
         self.pauses.append(s)
@@ -173,7 +173,7 @@ def test_stop():
     check("stops when a scroll loads nothing new", (len(rows), d.scrolls), (30, 3))
     check("one patient re-read before giving up", d.reads, 1 + 3 + 1)
     d = FakeDriver(sizes=[10 * i for i in range(1, 20)])
-    rows, note = rd.page_reviews(d, [], cap=500, want=None, max_scrolls=8, **zero)
+    rows, note = rd.page_reviews(d, [], cap=500, want=None, rating=4.5, max_scrolls=8, **zero)
     check("never more than max_scrolls (8)", (d.scrolls, len(rows)), (8, 90))
     check("default max scrolls is 8", rd.MAX_SCROLLS, 8)
     d = FakeDriver()
@@ -196,13 +196,13 @@ def test_stop():
     check("order: open, sort, then scrolls", d.calls[:3], ["open", "sort", "scroll"])
     seen = []
     d = FakeDriver(sizes=(10, 20, 30))
-    rd.page_reviews(d, [], cap=30, rand=lambda a, b: (seen.append((a, b)), (a + b) / 2)[1])
+    rd.page_reviews(d, [], cap=30, rating=4.2, rand=lambda a, b: (seen.append((a, b)), (a + b) / 2)[1])
     check("waits drawn from 1.5-3 s", set(seen), {(1.5, 3.0)})
     check("a wait after every scroll", len(d.pauses) >= 1 + d.scrolls, True)
     import random as _r
     rnd = _r.Random(7)
     d = FakeDriver(sizes=(10, 20, 30))
-    rd.page_reviews(d, [], cap=30, rand=rnd.uniform)
+    rd.page_reviews(d, [], cap=30, rating=4.2, rand=rnd.uniform)
     check("jittered, in range", (all(1.5 <= p <= 3.0 for p in d.pauses), len(set(d.pauses)) == len(d.pauses)), (True, True))
 
 
@@ -225,18 +225,83 @@ def test_static():
     check("live menu sends 'Mới nhất' NOT in NFC (why the JS normalizes)", "Mới nhất" in menu, False)
     check("menu has 'Mới nhất' after NFC", "Mới nhất" in unicodedata.normalize("NFC", menu), True)
     check("parser normalizes to NFC", rd.parse_html(menu).text().count("Mới nhất"), 1)
-    for js in ("_JS_TAB", "_JS_SORT_OPEN", "_JS_SORT_PICK", "_JS_EXPAND"):
+    for js in ("_JS_TAB", "_JS_SORT_BTN", "_JS_PICK", "_JS_APPLIED", "_JS_IS_NEWEST", "_JS_EXPAND"):
         check(f"{js} compares NFC-normalized labels", "normalize('NFC')" in getattr(rd, js), True)
     check("sort pick falls back to data-index=1 ('Mới nhất' in the live menu)",
-          'data-index="1"' in menu and "data-index')==='1'" in rd._JS_SORT_PICK, True)
+          'data-index="1"' in menu and "data-index')==='1'" in rd._JS_PICK, True)
     check("sort button label (closed menu, icon glyph after it)", rd.parse_html(fx("sort_button.html")).text().startswith("Phù hợp nhất"), True)
     allfx = "".join(fx(n) for n in os.listdir(FX))
     check("fixtures carry no cookies/tokens", [w for w in ("SAPISID", "__Secure-", "HSID", "SSID=", "NID=", "AIza", "ved=")
                                                if w in allfx], [])
 
 
+def test_skip0():
+    print("=== (b) no reviews -> the panel is not opened")
+    zero = dict(wait=(0, 0), rand=lambda a, b: a)
+    for label, kw in (("Google count 0", dict(want=0)), ("count '0' as text", dict(want="0")),
+                      ("no count, no rating, no preview", dict(want=None, rating=None)),
+                      ("count 0 even with a rating", dict(want=0, rating=4.0))):
+        d = FakeDriver()
+        rows, note = rd.page_reviews(d, [], cap=50, **kw, **zero)
+        check(f"{label} -> dom_skip0, page untouched", (rows, note, d.calls), ([], "dom_skip0", []))
+    d = FakeDriver()
+    rows, note = rd.page_reviews(d, [], cap=50, want=None, rating=4.6, **zero)
+    check("no count but a rating -> still reads", (note.startswith("dom+"), d.calls[:2]), (True, ["open", "sort"]))
+    d = FakeDriver()
+    rows, note = rd.page_reviews(d, PREVIEW[:2], cap=50, want=None, rating=None, **zero)
+    check("no count/rating but preview rows -> still reads", d.calls[:1], ["open"])
+    for want in (2, 8, "8"):
+        d = FakeDriver()
+        rows, note = rd.page_reviews(d, PREVIEW[:min(8, int(want))], cap=50, want=want, rating=5, **zero)
+        check(f"preview covers Google's count ({want!r}) -> dom_skip", (note, d.calls), ("dom_skip", []))
+    d = FakeDriver()
+    rows, note = rd.page_reviews(d, PREVIEW, cap=50, want="n/a", rating=4.0, **zero)
+    check("unparsable count -> treated as unknown (reads to cap)", d.calls[:1], ["open"])
+
+
+def test_sort_pick():
+    print("=== (a) sort button / newest item found by structure, any language")
+    mac = rd.parse_html(fx("sort_button.html") + C10)
+    b = rd.pick_sort_button(mac)
+    check("Mac panel: sort button", (b is not None and "FNe70d" in b.cls()), True)
+    adm = rd.parse_html(fx("sort_area_admin.html") + C10)
+    b = rd.pick_sort_button(adm)
+    check("Admin panel (info + write-review popups first): picks FNe70d, not the info button", b.cls(), ["FNe70d"])
+    en = fx("sort_area_admin.html").replace("Phù hợp nhất", "Most relevant").replace('class="FNe70d"', 'class="Zz9"')
+    check("English labels, renamed class -> by label", rd.pick_sort_button(rd.parse_html(en + C10)).cls(), ["Zz9"])
+    xx = fx("sort_area_admin.html").replace("Phù hợp nhất", "Najbardziej trafne").replace('class="FNe70d"', 'class="Zz9"')
+    check("unknown language + renamed class -> nearest popup button above the cards",
+          rd.pick_sort_button(rd.parse_html(xx + C10)).cls(), ["Zz9"])
+    inside = '<div class="jftiEf" data-review-id="RV_X"><button aria-haspopup="true" aria-expanded="false" aria-label="Thao tác">.</button></div>'
+    check("popup buttons inside / below review cards are ignored", rd.pick_sort_button(rd.parse_html(C10 + inside)), None)
+    menu = fx("sort_menu.html")
+    i = rd.pick_newest_item(rd.parse_html(menu))
+    check("Mac menu (NFD 'Mới nhất'): newest item", (i.attrs.get("data-index"), rd._nfc(i.text())), ("1", "Mới nhất"))
+    bare = re.sub(r'\srole="menu"', "", menu)
+    check("menu without a role=menu wrapper still works", rd.pick_newest_item(rd.parse_html(bare)).attrs.get("data-index"), "1")
+    import unicodedata
+    en = unicodedata.normalize("NFC", menu).replace("Phù hợp nhất", "Most relevant").replace("Mới nhất", "Newest")
+    en = re.sub(r'data-index="(\d)"', r'data-index="x\1"', en)     # no data-index help: text only
+    check("English menu: by text", rd._nfc(rd.pick_newest_item(rd.parse_html(en)).text()), "Newest")
+    ru = re.sub(r'data-index="(\d)"', r'data-index="x\1"', unicodedata.normalize("NFC", menu)).replace("Mới nhất", "Сначала новые")
+    check("Russian menu: by text", rd._nfc(rd.pick_newest_item(rd.parse_html(ru)).text()), "Сначала новые")
+    pos = re.sub(r'data-index="(\d)"', r'data-index="x\1"', unicodedata.normalize("NFC", menu)).replace("Mới nhất", "Najnowsze")
+    check("unknown language, no data-index -> 2nd radio item", rd._nfc(rd.pick_newest_item(rd.parse_html(pos)).text()), "Najnowsze")
+    share = '<div role="menu"><div role="menuitem">Sao chép</div><div role="menuitem">Chia sẻ</div></div>'
+    check("a non-sort menu (< 3 items) is never clicked", rd.pick_newest_item(rd.parse_html(share)), None)
+    check("labels: one list shared by Python and JS", all(json.dumps(rd._SORT_RE.pattern) in getattr(rd, j)
+          for j in ("_JS_SORT_BTN", "_JS_PICK", "_JS_APPLIED")), True)
+    check("every newest label is also a sort label", all(rd._SORT_RE.search(x) for x in rd.NEWEST_LABELS), True)
+    zero = dict(wait=(0, 0), rand=lambda a, b: a)
+    for why in ("no_btn", "no_menu", "no_item", "not_applied"):
+        rows, note = rd.page_reviews(FakeDriver(sort=why), PREVIEW, cap=50, want=30, **zero)
+        check(f"sort miss '{why}' -> reason in the note, still reads", note, f"dom+22/2s,unsorted:{why}")
+    rows, note = rd.page_reviews(FakeDriver(sort=True), PREVIEW, cap=50, want=30, **zero)
+    check("verified sort -> no unsorted flag", note, "dom+22/2s")
+
+
 def main():
-    test_parse(); test_expand(); test_merge(); test_stop(); test_static()
+    test_parse(); test_expand(); test_merge(); test_stop(); test_skip0(); test_sort_pick(); test_static()
     print()
     if FAILURES:
         print(f"{len(FAILURES)} FAILED: {FAILURES}")
