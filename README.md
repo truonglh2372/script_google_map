@@ -37,6 +37,20 @@ Muốn đổi giá trị thì đặt biến môi trường cùng tên trước l
 - Số đếm cộng dồn trong `heartbeat_state.json`; gửi lỗi thì giữ lại và gửi lại đúng body + `Idempotency-Key` cũ, nên server không đếm hai lần. Lỗi heartbeat không bao giờ làm dừng crawler. `AQD_HEARTBEAT=0` để tắt.
 - Test offline (không gọi mạng): `python3 tools/test_heartbeat.py`.
 
+## Gọi thẳng server gốc, bỏ qua Cloudflare (an_uong_quanh_day#1058)
+Đường Viettel → Cloudflare SG hay mất gói nên gọi API qua Cloudflare chậm. Thêm **một dòng** vào `creds.env` (hoặc biến môi trường) để gọi thẳng server gốc:
+
+```
+AQD_ORIGIN_IP=<IP server gốc, chủ dự án đưa>
+```
+
+- Giống `curl --resolve`: chỉ việc tra DNS của host trong `AQD_BASE` được thay bằng IP đó. URL, SNI, header `Host` và việc kiểm tra chứng chỉ vẫn dùng tên `anuongquanhday.com`, nên chứng chỉ phải khớp tên (server gốc có sẵn chứng chỉ Let's Encrypt cho tên này). **Không bao giờ tắt kiểm tra TLS**; token / đăng nhập admin không đổi.
+- Chỉ pin đúng host của `AQD_BASE`; Google, Foody, CDN ảnh... vẫn tra DNS bình thường.
+- `AQD_BASE` phải là `https://...` và `AQD_ORIGIN_IP` phải là đúng một địa chỉ IP, không thì client admin báo lỗi ngay (`OriginPinError`) còn heartbeat tự tắt. Để trống / không có dòng này = như cũ (qua Cloudflare).
+- **Bỏ:** xoá dòng đó rồi khởi động lại crawler. Chạy lại installer và chọn ghi đè `creds.env` sẽ mất dòng này (khi đó crawler lại đi qua Cloudflare, vẫn chạy được); thêm lại sau khi cài.
+- Kiểm tra trên máy: `curl -s -o /dev/null -w '%{http_code} %{time_total}\n' --resolve anuongquanhday.com:443:<IP> https://anuongquanhday.com/up` phải ra `200`.
+- Test offline: `python3 tools/test_origin_pin.py` (server TLS thật ở 127.0.0.1 với CA tạm; phần `requests` cần `pip install -r requirements.txt`).
+
 ## Dữ liệu Google thêm (từ 17/10/2026)
 Khi fetch một quán, `maps_fetch.py` lấy thêm các dữ liệu dưới đây, **không tốn thêm request nào tới Google** (đọc ngay từ JSON preview vốn đã tải):
 - **Đánh giá:** `google_rating`, `google_review_count`, phân bố 1–5 sao, và tối đa **20** đánh giá có sẵn trong preview. Mỗi đánh giá gồm tên hiển thị của người viết (chỉ tên, không lưu id hay avatar), số sao, nội dung, ngày đăng và ảnh kèm theo. Ảnh chỉ được giữ khi CLIP xếp là `food` / `drink`, tối đa 12 ảnh mỗi quán (`AQD_REVIEW_PHOTO_CAP`) và chỉ lưu URL.
@@ -248,6 +262,7 @@ Windows mặc định **cp1252**, nên mọi `open()` thiếu `encoding="utf-8"`
 python tools/test_id_filter.py          # lọc ID theo đuôi + parity (cả windows/alt.py và mac/alt.py)
 python tools/test_list_paging.py        # list từng phần: ETA, cửa sổ trang, AQD_FETCH_LIMIT, fallback server cũ
 python tools/test_no_streetview.py      # #681: không tải ảnh Street View lên, không đặt làm ảnh bìa
+python tools/test_origin_pin.py         # an_uong_quanh_day#1058: AQD_ORIGIN_IP gọi thẳng server gốc, TLS vẫn kiểm tra theo tên
 powershell -File tools/test_installer_stream.ps1   # Nat -Stream (tiến độ pip) + tín hiệu sống + timeout
 powershell -File tools/test_installer_guards.ps1   # guard theo root, Chrome theo root, cảnh báo đuôi/parity, CLEAN dọn .py lạ, mọi prompt có mặc định
 bash tools/test_installer_mac.sh        # installer Mac: prompt/mặc định, layout phẳng, aqd_config.json, cảnh báo trùng, guard root, Chrome theo root, plist, CLEAN (mọi công cụ macOS đều được stub; cần bash)

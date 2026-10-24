@@ -31,6 +31,9 @@ except ImportError:
     fcntl = None
 from PIL import Image
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import origin_pin  # noqa: E402  AQD_ORIGIN_IP: call the origin directly, bypassing Cloudflare
+
 ROOT = os.environ.get("AQD_ROOT", "C:/aqd").replace("\\", "/")
 BASE = os.environ.get("AQD_BASE", "https://anuongquanhday.com")
 SESSION_DIR = os.environ.get("AQD_SESSION_DIR", ROOT + "/.aqd_session")
@@ -244,6 +247,7 @@ class TokenStore:
 class AQD:
     def __init__(self, base=BASE, verbose=False):
         self.base = base
+        origin_pin.install(base)  # no-op unless AQD_ORIGIN_IP is set; TLS still verified against the host name
         self.verbose = verbose
         self.pending_roles = {}   # photo_id -> pending_role for URL photos still downloading (#704)
         self.ua = "aqd-api/2.0 (+grok-bot)"
