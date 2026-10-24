@@ -261,6 +261,7 @@ Windows mặc định **cp1252**, nên mọi `open()` thiếu `encoding="utf-8"`
 ```powershell
 python tools/test_id_filter.py          # lọc ID theo đuôi + parity (cả windows/alt.py và mac/alt.py)
 python tools/test_list_paging.py        # list từng phần: ETA, cửa sổ trang, AQD_FETCH_LIMIT, fallback server cũ
+python tools/test_audit_gaps.py         # #1083 review 50 + phân trang, #1084 ảnh gửi 0 + replay, #1085 ổ đĩa, #1087 thin
 python tools/test_no_streetview.py      # #681: không tải ảnh Street View lên, không đặt làm ảnh bìa
 python tools/test_origin_pin.py         # an_uong_quanh_day#1058: AQD_ORIGIN_IP gọi thẳng server gốc, TLS vẫn kiểm tra theo tên
 powershell -File tools/test_installer_stream.ps1   # Nat -Stream (tiến độ pip) + tín hiệu sống + timeout
@@ -271,6 +272,39 @@ bash tools/test_installer_mac.sh        # installer Mac: prompt/mặc định, l
 `tools/test_list_paging.py` dựng một server giả ở `127.0.0.1` (cả 2 chế độ: có và không có `per_page`) và chạy
 `safe_run.py list` thật; `tools/test_installer_stream.ps1` chạy một tiến trình con in dần để chứng minh output
 được stream và dòng "still running" xuất hiện — không tải package nào.
+
+## Sửa lỗi sau audit 24/10/2026 (an_uong_quanh_day#1083 #1084 #1085 #1087)
+
+| Biến | Mặc định | Ý nghĩa |
+|---|---|---|
+| `AQD_MAX_REVIEWS` | `50` | Số review Google giữ mỗi quán (#1083). Preview chỉ có 5–8, phần còn lại phân trang `listugcposts` **trong Chrome đã đăng nhập** (chưa đăng nhập Google trả 403 → giữ review của preview). |
+| `AQD_GOOGLE_REVIEWS_PUSH_MAX` | `= AQD_MAX_REVIEWS` | Số review gửi lên `PUT google_reviews`. Server cũ còn giới hạn 20 (`validate.rb`): gặp 422 thì gửi lại 20 review mới nhất và nhớ giới hạn 20 cho tới hết tiến trình — không hỏng gì trước khi deploy web. |
+| `AQD_PHOTO_RETRY_BACKOFF_MIN` | `15` | #1084: quán **có ảnh được chọn nhưng server nhận 0 ảnh** không còn là OK/SAFE_DONE mà là `ERROR PHOTOS_UNSENT`, vẫn draft, ghi `photo_retry.json`; thử lại sau 15, 30, 60… phút (tối đa 6 giờ). |
+| `AQD_PHOTO_RETRY_MAX` | `3` | Sau 3 lần thử lại vẫn 0 ảnh → lần cuối hoàn tất quán không ảnh (`WARN photos_unsent_gave_up`, entry `gave_up`). `alt.py` gọi `safe_run.py push --photo-retry` khi có quán đến hạn. |
+| `AQD_MIN_FREE_GB` | `5` | #1085: ổ dữ liệu còn trống < 5 GB → không cào/đẩy; `alt.py` ghi log + heartbeat `disk_full`/`blocked` rồi nghỉ; `safe_run` chạy dưới `alt.py` thoát mã `4`. `0` = tắt. |
+| `AQD_DISK_PAUSE_MIN` | `10` | Thời gian nghỉ mỗi lần ổ đầy trước khi kiểm tra lại. |
+| `AQD_ALLOW_THIN` | `0` | #1087: **dữ liệu Maps "thin" không bao giờ được validate.** `run` (chế độ CDP) kiểm tra Chrome đã đăng nhập Google (chỉ xem *tên* cookie `SID`/`__Secure-1PSID`/`__Secure-3PSID`, không đọc giá trị); chưa đăng nhập → `REFUSE TO RUN`, mã thoát `5`, `alt.py` chờ 30 phút. Quán trả về thin → không gửi gì, không `info.json`/`SAFE_PREP`, ghi `THIN` + `info.thin.json`, quán vẫn là draft chưa tên nên vòng sau cào lại; 3 quán thin liên tiếp → nghỉ Maps như trang rỗng. `push` không bao giờ validate `info.json` thin. `1` = hành vi cũ (chỉ cho test/chạy tay). |
+
+### Gửi lại ảnh cho quán "chọn ảnh nhưng gửi 0" (#1084) — CHUẨN BỊ, CHƯA CHẠY
+
+Danh sách ID (chỉ đọc `aqd_data`, tạo 24/10/2026 21:00 ICT): `tools/replay_ids/gmaps_<máy>_{7d,all}.tsv` (`id  số ảnh đã chọn  SAFE_DONE  thin`).
+
+| File | Số quán | Ghi chú |
+|---|---|---|
+| `gmaps_mac_7d.tsv` | 5 | SAFE_DONE trong 7 ngày (mới nhất 18/10 08:36) |
+| `gmaps_admin_7d.tsv` | 405 | mới nhất 18/10 20:19 |
+| `gmaps_mac_all.tsv` | 2617 | 27 dòng `thin` |
+| `gmaps_admin_all.tsv` | 3429 | 74 dòng `thin` |
+
+Tạo lại (chỉ đọc): `python tools/replay_ids/make_ids.py <AQD_ROOT> tools/replay_ids <mac|admin>`. Tiêu chí: `info.json` có `photo_urls`, `applied.json` không có `photo_id` nào, đã `SAFE_DONE`. Từ 18/10 20:19 không còn quán mới nào như vậy.
+Phần lớn danh sách `all` là quán trước #704 (≤ 18/10 08:36): khi đó POST ảnh chạy async (202, `photos: []`) nên `applied.json` không có id dù server **có** ảnh — vì vậy `--apply` luôn GET ảnh trên server trước và bỏ qua quán đã có ảnh.
+
+```bash
+python safe_run.py replay-photos --ids-file tools/replay_ids/gmaps_mac_7d.tsv                 # dry run: chỉ đọc file local, không request
+python safe_run.py replay-photos --ids-file tools/replay_ids/gmaps_mac_7d.tsv --check-server  # chỉ GET: bao nhiêu quán thật sự chưa có ảnh
+python safe_run.py replay-photos --ids-file tools/replay_ids/gmaps_mac_7d.tsv --apply --limit 20   # gửi thật (cần được duyệt)
+```
+`--apply` chỉ POST ảnh (chunk 5, Guard 3 s, STOP file, kiểm tra ổ đĩa), không PATCH info/status, không ghi `SAFE_DONE`; quán đã xử lý ghi vào `replay_photos.done` nên chạy lại sẽ tiếp tục. Dừng crawler (`STOP_ALL`) trước khi chạy để không tranh `applied.json`.
 
 ## Bí mật
 Token API nằm trong `creds.env` (KHÔNG commit). Không commit chrome-profile, cookie, dữ liệu `aqd_data/`, log, queue.

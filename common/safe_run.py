@@ -6,8 +6,15 @@
   list : one page window of the unnamed drafts (--start-page/--max-pages/--per-page/--unnamed/--id-suffix, with a
          probe + fallback to the old 24/page listing) + a <queue>.meta.json sidecar the caller uses to continue.
   run  : list order, one place at a time; --limit caps how many places this pass handles.
+  push --photo-retry : re-push the places whose photos were picked but none was sent (photo_retry.json, #1084).
+  replay-photos --ids-file F [--check-server] [--apply] : one-off re-send of picked-but-unsent photos (#1084);
+         dry run by default, --apply skips places that already have server photos.
+Thin Maps data is never validated (an_uong_quanh_day#1087): run refuses to start when the CDP Chrome is not signed in to Google
+(exit 5 under AQD_ALT), a thin place is not pushed (stays an unnamed draft, retried later; aqd_data/<id>/THIN), and
+push never marks a thin info.json done. AQD_ALLOW_THIN=1 turns this off (tests / manual runs only).
+Free disk below AQD_MIN_FREE_GB (default 5) pauses before any fetch/push (#1085; under AQD_ALT: exit 4).
 Run: bash -c 'set -a; . C:/aqd/.aqd_session/creds.env; set +a; python3 C:/aqd/safe_run.py prep|push [--limit N]'"""
-import argparse, json, os, random, re, sys, time
+import argparse, json, os, random, re, shutil, sys, time
 ROOT = os.environ.get("AQD_ROOT", "C:/aqd").replace("\\", "/")
 sys.path.insert(0, ROOT)
 import maps_fetch as mf
@@ -23,6 +30,136 @@ QUEUE = ROOT + "/queue.json"
 GAP, SLOW, HTTP_TO, PHOTO_CHUNK, COOLDOWN = 3.0, 20.0, 45, 5, 300
 LIST_PAGE_MAX, LIST_META = 500, ".meta.json"
 STOPFILE = ROOT + "/STOP"
+EXIT_DISK = 4   # alt.py: disk low -> pause, then re-check (an_uong_quanh_day#1085)
+EXIT_SIGNED_OUT = 5   # alt.py: Chrome not signed in to Google -> do not fetch, wait for a person (an_uong_quanh_day#1087)
+SIGNIN_COOKIES = ("SID", "__Secure-1PSID", "__Secure-3PSID")
+
+
+def allow_thin():
+    return os.environ.get("AQD_ALLOW_THIN", "0").lower() in ("1", "true", "yes")
+
+
+def is_thin(info):
+    """A limited (signed-out / reduced) Maps payload: never validate it (an_uong_quanh_day#1087)."""
+    return bool(((info or {}).get("_maps") or {}).get("thin"))
+
+
+def chrome_signed_in():
+    """True/False: does the CDP Chrome profile hold a Google sign-in cookie? Only cookie NAMES are looked at
+    (values are never read out or logged). None = could not tell (Chrome not reachable)."""
+    try:
+        pg = _pw_page()
+        names = {c.get("name") for c in pg.context.cookies(["https://www.google.com", "https://accounts.google.com"])}
+    except Exception as e:
+        print(f"sign-in check failed ({type(e).__name__})", flush=True)
+        return None
+    return any(n in names for n in SIGNIN_COOKIES)
+
+
+def require_signin():
+    """cmd_run start (CDP mode): refuse to fetch with a signed-out Chrome, it only gets the limited Maps view."""
+    if not os.environ.get("AQD_CDP") or allow_thin():
+        return True
+    ok = chrome_signed_in()
+    if ok is False:
+        log("REFUSE TO RUN: the Chrome profile on the CDP port is NOT signed in to Google, so Maps serves the limited "
+            "view (thin data: fewer fields/photos/reviews, no types). Sign in to Google in that Chrome window, then "
+            "restart; nothing was fetched or pushed.")
+        hb("note", "login_required", "Chrome not signed in to Google; crawler refuses thin Maps data")
+        hb("beat", "Chrome chưa đăng nhập Google - dừng", status="blocked", force=True)
+        return False
+    return True
+
+
+def _env_num(name, default, cast=float):
+    try:
+        return cast(os.environ.get(name, "") or default)
+    except ValueError:
+        return default
+
+
+# ---- free-disk guard (an_uong_quanh_day#1085) ----
+MIN_FREE_GB = _env_num("AQD_MIN_FREE_GB", 5.0)
+DISK_PAUSE_MIN = _env_num("AQD_DISK_PAUSE_MIN", 10.0)
+
+
+def free_gb(path=None):
+    try:
+        return shutil.disk_usage(path or ROOT).free / 1e9
+    except OSError:
+        return None   # unknown -> never block on it
+
+
+def disk_ok(where=""):
+    """True when the data disk has >= AQD_MIN_FREE_GB free (0 disables the guard). Low -> log + heartbeat note."""
+    free = free_gb()
+    if MIN_FREE_GB <= 0 or free is None or free >= MIN_FREE_GB:
+        return True
+    log(f"DISK LOW {free:.1f} GB free < {MIN_FREE_GB:g} GB{(' at ' + where) if where else ''}; pause {DISK_PAUSE_MIN:g} min")
+    hb("note", "disk_full", f"{free:.1f} GB free < {MIN_FREE_GB:g} GB")
+    hb("beat", f"tạm ngừng: ổ đĩa còn {free:.1f} GB", status="blocked", force=True)
+    return False
+
+
+def disk_guard(where=""):
+    """Block until there is room again. Under AQD_ALT exit EXIT_DISK so alt.py pauses and re-checks itself.
+    Returns False when the STOP file ends the wait."""
+    while not disk_ok(where):
+        if os.environ.get("AQD_ALT"):
+            sys.exit(EXIT_DISK)
+        if not nap(DISK_PAUSE_MIN * 60):
+            return False
+    return True
+
+
+# ---- photos picked but none sent -> retry with backoff (an_uong_quanh_day#1084) ----
+PHOTO_RETRY = ROOT + "/photo_retry.json"
+PHOTO_RETRY_MAX = max(1, _env_num("AQD_PHOTO_RETRY_MAX", 3, int))
+PHOTO_RETRY_BACKOFF_MIN = max(1.0, _env_num("AQD_PHOTO_RETRY_BACKOFF_MIN", 15.0))
+PHOTO_RETRY_CAP_MIN = 360.0
+
+
+class PhotosUnsent(Exception):
+    """push_one: the place has picked photos but the server accepted none of them."""
+
+
+def _pr_load():
+    try:
+        with open(PHOTO_RETRY, encoding="utf-8") as f: return json.load(f) or {}
+    except (OSError, ValueError):
+        return {}
+
+
+def _pr_save(d):
+    with open(PHOTO_RETRY + ".tmp", "w", encoding="utf-8") as f: json.dump(d, f, ensure_ascii=False, indent=1)
+    os.replace(PHOTO_RETRY + ".tmp", PHOTO_RETRY)
+
+
+def photo_retry_fail(rid, msg, now=None):
+    """Count one more unsent push of `rid`; next try after 15, 30, 60 ... min (cap 6 h). Returns the entry."""
+    now = time.time() if now is None else now
+    d = _pr_load(); e = d.get(str(rid)) or {"tries": 0}
+    e["tries"] = int(e.get("tries") or 0) + 1
+    e["state"] = "retry"
+    e["next_at"] = now + min(PHOTO_RETRY_BACKOFF_MIN * 2 ** (e["tries"] - 1), PHOTO_RETRY_CAP_MIN) * 60
+    e["last"] = str(msg)[:300]; e["at"] = time.strftime("%F %T", time.localtime(now))
+    d[str(rid)] = e; _pr_save(d)
+    return e
+
+
+def photo_retry_end(rid, gave_up=False):
+    d = _pr_load(); e = d.get(str(rid))
+    if e and e.get("state") == "retry":
+        e["state"] = "gave_up" if gave_up else "done"; e["at"] = time.strftime("%F %T"); _pr_save(d)
+
+
+def photo_retry_due(now=None):
+    """{rid: tries} of the places whose next photo retry is due, newest id first."""
+    now = time.time() if now is None else now
+    d = _pr_load()
+    due = {int(k): int(e.get("tries") or 0) for k, e in d.items()
+           if k.isdigit() and e.get("state") == "retry" and float(e.get("next_at") or 0) <= now}
+    return dict(sorted(due.items(), reverse=True))
 
 
 
@@ -256,6 +393,8 @@ def build_info(row):
                     info = i2
         except Exception as e:
             print(f"browser fallback failed: {e}", flush=True)
+    if via == "chrome" and info["_meta"].get("via") == "chrome":
+        _more_reviews(info)
     meta = info.pop("_meta"); photos = info.pop("photo_urls")
     extra = meta.pop("extra", None) or {}
     _review_photo_filter(extra)
@@ -334,6 +473,33 @@ def cmd_prep(args):
     log(f"PREP END prepared {done}")
 
 
+_JS_GET = """async (path)=>{try{const r=await fetch(path,{credentials:'include'});return {status:r.status,body:await r.text()}}
+catch(e){return {status:0,body:String(e)}}}"""
+
+
+def _browser_get(path):
+    r = _PW["pg"].evaluate(_JS_GET, path) or {}
+    return r.get("status"), r.get("body") or ""
+
+
+def _more_reviews(info):
+    """#1083: page the Reviews of a place in the signed-in Chrome up to mf.REVIEW_CAP (AQD_MAX_REVIEWS, default 50).
+    Best effort: any problem keeps the preview's 5-8 reviews and never fails the place."""
+    meta = info.get("_meta") or {}
+    ex = meta.get("extra")
+    if not isinstance(ex, dict) or "pg" not in _PW:
+        return
+    have = ex.get("reviews") or []
+    try:
+        rows, note = mf.more_reviews(_browser_get, meta.get("hex_id"), have, cap=mf.REVIEW_CAP,
+                                     want=ex.get("google_review_count"))
+        ex["reviews"] = rows
+    except Exception as e:
+        note = f"ugc_err:{type(e).__name__}"
+    ex["reviews_paging"] = note
+    print(f"reviews {len(have)} -> {len(ex.get('reviews') or [])} ({note})", flush=True)
+
+
 SKIP_KEYS = ("_extra", "cover", "logo", "stay_draft", "stay_reason", "note", "photo_urls", "has_menu_photos", "_maps")
 
 
@@ -372,7 +538,30 @@ def push_extra(G, rid, folder, info, rec, save):
         return f"{head} extras_failed:{type(e).__name__}:{e}"[:300]
 
 
-def push_one(G, rid):
+def _post_photos(G, rid, todo, rec, save, roles=None):
+    """POST todo's image URLs in chunks of PHOTO_CHUNK; records accepted ones in rec["urls"].
+    Returns (added, failed = rejected by the server, unaccounted = neither a photo nor an error back)."""
+    added = failed = unacc = 0
+    for i in range(0, len(todo), PHOTO_CHUNK):
+        chunk = todo[i:i + PHOTO_CHUNK]
+        body = G.req("POST", f"{API}/{rid}/photos", json_body=_img_body(chunk, roles), raw_status=(422,))
+        photos, errors = body.get("photos") or [], body.get("errors") or []
+        bad = {e.get("url") for e in errors if isinstance(e, dict)}
+        it = iter(photos)
+        for c in chunk:
+            if _upsize_google(c["url"]) in bad: failed += 1; continue
+            p = next(it, None)
+            if p: rec["urls"][_url_hash(c["url"])] = _rec_photo(c, p, roles); added += 1
+            else: unacc += 1
+        save()
+    return added, failed, unacc
+
+
+def _sent_any(rec):
+    return any((v or {}).get("photo_id") for v in (rec.get("urls") or {}).values())
+
+
+def push_one(G, rid, allow_no_photos=False):
     folder = os.path.join(DATA_DIR, str(rid))
     info = json.load(open(os.path.join(folder, "info.json"), encoding="utf-8"))
     recp = os.path.join(folder, "applied.json")
@@ -380,6 +569,9 @@ def push_one(G, rid):
     rec.setdefault("urls", {})
     save = lambda: (json.dump(rec, open(recp + ".tmp", "w", encoding="utf-8"), ensure_ascii=False, indent=1), os.replace(recp + ".tmp", recp))
     t0 = time.time(); parts = []; warn = []
+    if is_thin(info) and not allow_thin():
+        open(os.path.join(folder, "THIN"), "w", encoding="utf-8").write(time.strftime("%F %T"))
+        return "thin", "thin Maps data (limited view) -> not pushed, not validated; needs a signed-in re-fetch"
     cur = G.req("GET", f"{API}/{rid}")["restaurant"]
     if cur.get("status") != "draft" or ((cur.get("name") or "").strip() and not rec.get("info")):
         return "skip", f"not an unnamed draft any more (status={cur.get('status')} name={cur.get('name')!r})"
@@ -393,20 +585,15 @@ def push_one(G, rid):
     # 2) photos, chunks of <=5, sequential
     items = info.get("photo_urls") or []
     todo = [it for it in items if _url_hash(it["url"]) not in rec["urls"]]
-    added = failed = 0
     roles = _pick_roles(todo, rec, want_cover=not rec.get("cover"), want_logo=not rec.get("logo"))
-    for i in range(0, len(todo), PHOTO_CHUNK):
-        chunk = todo[i:i + PHOTO_CHUNK]
-        body = G.req("POST", f"{API}/{rid}/photos", json_body=_img_body(chunk, roles), raw_status=(422,))
-        photos, errors = body.get("photos") or [], body.get("errors") or []
-        bad = {e.get("url") for e in errors if isinstance(e, dict)}
-        it = iter(photos)
-        for c in chunk:
-            if _upsize_google(c["url"]) in bad: failed += 1; continue
-            p = next(it, None)
-            if p: rec["urls"][_url_hash(c["url"])] = _rec_photo(c, p, roles); added += 1
-        save()
-    parts.append(f"photos=+{added}" + (f"/fail{failed}" if failed else "") + f"/of{len(items)}")
+    added, failed, unacc = _post_photos(G, rid, todo, rec, save, roles)
+    parts.append(f"photos=+{added}" + (f"/fail{failed}" if failed else "") + (f"/noid{unacc}" if unacc else "")
+                 + f"/of{len(items)}")
+    # #1084: photos were picked but the server took none -> the place is NOT done; stays draft and is retried later
+    if items and not _sent_any(rec):
+        if not allow_no_photos:
+            raise PhotosUnsent(" ".join(parts))
+        warn.append(f"photos_unsent_gave_up(after {PHOTO_RETRY_MAX} retries)")
     # No Street View fallback (#681): Google terms forbid re-hosting Street View imagery, so a place with no photo keeps no cover.
     # 3) cover / logo
     for role, key in (("cover", "role"), ("logo", "role2")):
@@ -447,21 +634,30 @@ def cmd_push(args):
     ids = sorted((int(d) for d in os.listdir(DATA_DIR) if d.isdigit() and os.path.exists(os.path.join(DATA_DIR, d, "SAFE_PREP"))
                   and not os.path.exists(os.path.join(DATA_DIR, d, "SAFE_DONE"))), reverse=True)
     if args.ids: ids = [i for i in args.ids if i in ids] if not args.force else args.ids
+    retry = {}
+    if getattr(args, "photo_retry", False):
+        retry = photo_retry_due()
+        ids = [i for i in retry if i in ids]
+        if ids: log(f"PHOTO RETRY {len(ids)} due: {ids[:5]}")
     if args.limit: ids = ids[:args.limit]
     if len(ids) > 1: log(f"PUSH START {len(ids)} ids: {ids[:5]}...")
     n = 0
     for rid in ids:
         if os.path.exists(STOPFILE): log("STOP file present; stopping"); break
+        if not disk_guard(f"push #{rid}"): log("STOP file present; stopping"); break
         while peak() and not args.ignore_peak:
             log("peak hours; sleeping 10 min"); time.sleep(600)
         tries = 0
+        last_try = retry.get(rid, 0) >= PHOTO_RETRY_MAX
         while True:
             try:
                 G.slow = None
-                kind, msg = push_one(G, rid)
+                kind, msg = push_one(G, rid, allow_no_photos=last_try)
                 if G.slow:
                     raise Overload("slow: " + G.slow)
                 break
+            except PhotosUnsent as e:
+                kind, msg = "retry", f"PHOTOS_UNSENT {e}"; break
             except Overload as e:
                 tries += 1
                 log(f"#{rid} OVERLOAD ({e}) try {tries}")
@@ -475,6 +671,14 @@ def cmd_push(args):
         n += 1
         if kind in ("ok", "warn"):
             open(os.path.join(DATA_DIR, str(rid), "SAFE_DONE"), "w", encoding="utf-8").write(time.strftime("%F %T"))
+            photo_retry_end(rid, gave_up=last_try)
+        elif kind == "retry":
+            e = photo_retry_fail(rid, msg)
+            msg += (f" -> retry {e['tries']}/{PHOTO_RETRY_MAX} after {time.strftime('%H:%M', time.localtime(e['next_at']))}"
+                    if e["tries"] <= PHOTO_RETRY_MAX else " -> last retry also unsent; finishing without photos next time")
+            kind = "error"
+        elif kind == "thin":
+            kind, msg = "error", "THIN " + msg
         info = json.load(open(os.path.join(DATA_DIR, str(rid), "info.json"), encoding="utf-8"))
         line = f"{rid} | safe | {info.get('name','')} | {info.get('category')} | {kind.upper()} {msg} - {time.strftime('%F %H:%M')}"
         open(PROG, "a", encoding="utf-8").write(line + "\n"); log(f"#{rid} {kind.upper()} {msg}")
@@ -597,6 +801,9 @@ def cmd_list(args):
 
 def cmd_run(args):
     rows = json.load(open(args.queue, encoding="utf-8")); GR = Guard()
+    if not require_signin():
+        if os.environ.get("AQD_ALT"): sys.exit(EXIT_SIGNED_OUT)
+        return "SIGNED_OUT"
     last_maps = 0.0; streak = 0; level = 0; done = 0; limit = max(0, int(args.limit or 0))
     for r in rows:
         if r["id"] <= args.floor: log(f"reached floor {args.floor}; stop"); break
@@ -604,6 +811,7 @@ def cmd_run(args):
         rid = r["id"]
         if rid in INTENTIONAL or os.path.exists(os.path.join(DATA_DIR, str(rid), "SAFE_DONE")): continue
         fetched = False
+        if not disk_guard(f"run #{rid}"): log("STOP file; end run"); break
         if not os.path.exists(os.path.join(DATA_DIR, str(rid), "SAFE_PREP")):
             fetched = True
             if os.path.exists(os.path.join(DATA_DIR, str(rid), "info.json")): continue   # someone else's
@@ -649,6 +857,28 @@ def cmd_run(args):
                             open(ROOT + "/fetch_backoff.txt", "w", encoding="utf-8").write(str(time.time() + m * 60)); sys.exit(3)
                         if not nap(m * 60): log("STOP file; end run"); break
                 continue
+            if is_thin(info) and not allow_thin():
+                # never validate thin data (an_uong_quanh_day#1087): no info.json/SAFE_PREP, nothing sent; the place stays an unnamed
+                # draft so the next listing picks it up again. 3 in a row -> the same Maps pause as an empty page.
+                d_ = os.path.join(DATA_DIR, str(rid)); os.makedirs(d_, exist_ok=True)
+                json.dump(info, open(os.path.join(d_, "info.thin.json"), "w", encoding="utf-8"), ensure_ascii=False, indent=1)
+                open(os.path.join(d_, "THIN"), "w", encoding="utf-8").write(time.strftime("%F %T"))
+                streak += 1
+                log(f"#{rid} THIN Maps data (via={info['_maps'].get('via')} photos={len(info['photo_urls'])}) -> NOT pushed, "
+                    f"retry later ({streak} in a row)")
+                hb("record_result", "error", f"#{rid} thin Maps data, not pushed")
+                if streak >= 3:
+                    if require_signin() is False and os.environ.get("AQD_ALT"): sys.exit(EXIT_SIGNED_OUT)
+                    m = BACKOFF_MIN[min(level, 2)]; level += 1
+                    log(f"Maps thin {streak} in a row (last #{rid}); pause Maps {m} min (level {level})")
+                    hb("note", "rate_limited", f"Maps thin {streak} in a row; pause {m} min")
+                    hb("beat", f"Maps paused {m} min (thin)", status="blocked", force=True)
+                    if os.environ.get("AQD_ALT"):
+                        open(ROOT + "/fetch_backoff.txt", "w", encoding="utf-8").write(str(time.time() + m * 60)); sys.exit(3)
+                    if not nap(m * 60): log("STOP file; end run"); break
+                continue
+            for f_ in ("THIN", "info.thin.json"):
+                if os.path.exists(os.path.join(DATA_DIR, str(rid), f_)): os.remove(os.path.join(DATA_DIR, str(rid), f_))
             lim, cnt, emb = limited_reason(info)
             m_ = info.get("_maps") or {}
             notypes = not info.get("google_types_text") or info.get("google_types_text") == "point_of_interest, establishment"
@@ -905,6 +1135,83 @@ def cmd_refetch(args):
             f"gallery={m_.get('gallery')} {' '.join(parts)}")
     log(f"REFETCH END; {len(priority_pending())} priority ids left")
 
+REPLAY_DONE = ROOT + "/replay_photos.done"
+
+
+def _read_ids(path):
+    out = []
+    for line in open(path, encoding="utf-8"):
+        t = line.split("#", 1)[0].split()
+        if t and t[0].isdigit() and int(t[0]) not in out: out.append(int(t[0]))
+    return out
+
+
+def replay_plan(rid):
+    """(todo photo items, reason) for one id from aqd_data: todo is empty when there is nothing to replay."""
+    folder = os.path.join(DATA_DIR, str(rid))
+    try:
+        info = json.load(open(os.path.join(folder, "info.json"), encoding="utf-8"))
+    except (OSError, ValueError):
+        return [], "no_info"
+    try:
+        rec = json.load(open(os.path.join(folder, "applied.json"), encoding="utf-8"))
+    except (OSError, ValueError):
+        rec = {}
+    items = info.get("photo_urls") or []
+    if not items: return [], "no_photos_picked"
+    if is_thin(info): return [], "thin_info"
+    if _sent_any(rec): return [], "already_sent"
+    return [it for it in items if _url_hash(it["url"]) not in (rec.get("urls") or {})], "replay"
+
+
+def cmd_replay_photos(args):
+    """#1084 one-off: re-send the picked photos of places where none was sent (ids from tools/replay_ids/).
+    Default = DRY RUN (local files only, no request). --check-server = read-only GET of each place's photos.
+    --apply = POST only for places that still have no photo on the server (GET first), same Guard / chunks /
+    STOP file / disk guard as push; info, status, cover/logo PUTs and SAFE_DONE are untouched."""
+    if not args.ids_file: sys.exit("replay-photos needs --ids-file")
+    done = {l.split()[0] for l in open(REPLAY_DONE, encoding="utf-8")} if os.path.exists(REPLAY_DONE) else set()
+    plan, tally = [], {}
+    for rid in _read_ids(args.ids_file):
+        if str(rid) in done:
+            tally["done_before"] = tally.get("done_before", 0) + 1; continue
+        todo, why = replay_plan(rid)
+        tally[why] = tally.get(why, 0) + 1
+        if todo: plan.append((rid, todo))
+    if args.limit: plan = plan[:args.limit]
+    mode = "APPLY" if args.apply else ("CHECK-SERVER" if args.check_server else "DRY RUN")
+    log(f"REPLAY-PHOTOS {mode}: {len(plan)} places, {sum(len(t) for _, t in plan)} photo URLs; {tally}")
+    if not (args.apply or args.check_server):
+        for rid, todo in plan[:10]: print(f"  #{rid} {len(todo)} photos", flush=True)
+        print("dry run: nothing sent. --check-server = read-only server check, --apply = send.", flush=True)
+        return tally
+    G = Guard(); res = {}
+    for rid, todo in plan:
+        if os.path.exists(STOPFILE): log("STOP file present; stopping"); break
+        if not disk_guard(f"replay #{rid}"): break
+        try:
+            have = (G.req("GET", f"{API}/{rid}/photos?page=1&per_page=1") or {}).get("photos") or []
+            if have or not args.apply:
+                k = "server_has_photos" if have else "server_has_none"
+                res[k] = res.get(k, 0) + 1
+                if args.apply: open(REPLAY_DONE, "a", encoding="utf-8").write(f"{rid} skip {k} {time.strftime('%F %H:%M')}\n")
+                continue
+            folder = os.path.join(DATA_DIR, str(rid)); recp = os.path.join(folder, "applied.json")
+            rec = json.load(open(recp, encoding="utf-8")) if os.path.exists(recp) else {}
+            rec.setdefault("urls", {})
+            save = lambda: (json.dump(rec, open(recp + ".tmp", "w", encoding="utf-8"), ensure_ascii=False, indent=1), os.replace(recp + ".tmp", recp))
+            roles = _pick_roles(todo, rec, want_cover=not rec.get("cover"), want_logo=not rec.get("logo"))
+            added, failed, unacc = _post_photos(G, rid, todo, rec, save, roles)
+            k = "sent" if added else "still_unsent"; res[k] = res.get(k, 0) + 1
+            open(REPLAY_DONE, "a", encoding="utf-8").write(f"{rid} {k} +{added}/fail{failed}/noid{unacc}/of{len(todo)} {time.strftime('%F %H:%M')}\n")
+            log(f"#{rid} REPLAY {k} photos=+{added}/fail{failed}/noid{unacc}/of{len(todo)}")
+        except Overload as e:
+            log(f"#{rid} OVERLOAD ({e}); replay stops here (re-run continues after the done list)"); break
+        except Exception as e:
+            log(f"#{rid} REPLAY ERROR {type(e).__name__}: {str(e)[:150]}")
+    log(f"REPLAY-PHOTOS END {mode}: {res}")
+    return res
+
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser(); ap.add_argument("cmd"); ap.add_argument("--limit", type=int, default=0)
@@ -913,5 +1220,10 @@ if __name__ == "__main__":
     ap.add_argument("--start-page", type=int, default=1); ap.add_argument("--max-pages", type=int, default=0)
     ap.add_argument("--per-page", type=int, default=0); ap.add_argument("--unnamed", action="store_true")
     ap.add_argument("--id-suffix", default="")
+    ap.add_argument("--photo-retry", action="store_true", help="push: only the places whose photo retry is due (#1084)")
+    ap.add_argument("--ids-file", default="", help="replay-photos: one id per line (# comments)")
+    ap.add_argument("--apply", action="store_true", help="replay-photos: really POST (default: dry run)")
+    ap.add_argument("--check-server", action="store_true", help="replay-photos: read-only server photo check")
     a = ap.parse_args()
-    {"prep": cmd_prep, "push": cmd_push, "run": cmd_run, "list": cmd_list, "backfill": cmd_backfill, "refetch": cmd_refetch}[a.cmd](a)
+    {"prep": cmd_prep, "push": cmd_push, "run": cmd_run, "list": cmd_list, "backfill": cmd_backfill, "refetch": cmd_refetch,
+     "replay-photos": cmd_replay_photos}[a.cmd](a)

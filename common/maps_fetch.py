@@ -11,7 +11,7 @@ Signed-out view: the photo set is what the preview embeds (a few per category), 
 Polite: >=1.1 s between requests in a process; stops on HTTP 429 / 'sorry' / consent pages.
 Exit codes: 0 ok, 2 error, 3 no place block, 4 blocked. _meta.thin=true -> reduced payload (types/photos missing).
 Nothing is written anywhere (stdout only)."""
-import argparse, html, json, re, sys, time
+import argparse, html, json, os, re, sys, time
 import requests
 
 UA = ("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36")
@@ -126,7 +126,18 @@ def hours_text(p):
 
 
 # ---- extras (2026-10-17): Google rating/reviews sample, weekly opening periods, About attributes ----
-REVIEW_CAP = 20
+def _env_int(name, default, lo=1):
+    try:
+        return max(lo, int(os.environ.get(name, "") or default))
+    except ValueError:
+        return default
+
+
+# an_uong_quanh_day#1083: keep up to AQD_MAX_REVIEWS (default 50) reviews per place. The preview embeds only 5-8, the
+# rest come from paging listugcposts in the signed-in Chrome (more_reviews); signed out, Google answers 403.
+REVIEW_CAP = _env_int("AQD_MAX_REVIEWS", 50)
+UGC_PAGE = 20
+UGC_MAX_PAGES = 6
 _WD = {"Thứ Hai": 1, "Thứ Ba": 2, "Thứ Tư": 3, "Thứ Năm": 4, "Thứ Sáu": 5, "Thứ Bảy": 6, "Chủ Nhật": 7}
 
 
@@ -169,28 +180,93 @@ def _ts(us):
         return None
 
 
-def reviews(p, cap=REVIEW_CAP):
+def review_row(n):
+    """One review node (the same shape in the preview and in listugcposts) -> row, or None."""
+    if not isinstance(n, list):
+        return None
+    meta, body = g(n, 1) or [], g(n, 2) or []
+    rating = g(body, 0, 0)
+    text = g(body, 15, 0, 0)
+    photos = []
+    for ph in g(body, 2) or []:
+        u = g(ph, 1, 6, 0)
+        if isinstance(u, str) and "googleusercontent.com" in u:
+            photos.append(_base(u))
+    return {"id": g(n, 0), "author": g(meta, 4, 5, 0), "rating": rating if isinstance(rating, int) else None,
+            "text": text if isinstance(text, str) else "", "published_at": _ts(g(meta, 2)),
+            "relative_date": g(meta, 6), "language": g(body, 14, 0), "photo_urls": photos}
+
+
+def _newest_first(rows):
+    rows.sort(key=lambda x: x.get("published_at") or "", reverse=True)
+    return rows
+
+
+def reviews(p, cap=None):
     """Reviews embedded in the place preview (no extra request). Author display name only (no profile id/url/avatar)."""
+    cap = REVIEW_CAP if cap is None else cap
     out = []
     for r in g(p, 175, 9, 0, 0) or []:
-        n = g(r, 0)
-        if not isinstance(n, list):
+        row = review_row(g(r, 0))
+        if row is None:
             continue
-        meta, body = g(n, 1) or [], g(n, 2) or []
-        rating = g(body, 0, 0)
-        text = g(body, 15, 0, 0)
-        photos = []
-        for ph in g(body, 2) or []:
-            u = g(ph, 1, 6, 0)
-            if isinstance(u, str) and "googleusercontent.com" in u:
-                photos.append(_base(u))
-        out.append({"id": g(n, 0), "author": g(meta, 4, 5, 0), "rating": rating if isinstance(rating, int) else None,
-                    "text": text if isinstance(text, str) else "", "published_at": _ts(g(meta, 2)),
-                    "relative_date": g(meta, 6), "language": g(body, 14, 0), "photo_urls": photos})
+        out.append(row)
         if len(out) >= cap:
             break
-    out.sort(key=lambda x: x.get("published_at") or "", reverse=True)
-    return out
+    return _newest_first(out)
+
+
+def ugc_path(hexid, token="", n=UGC_PAGE, sid="aqd"):
+    """Same-origin path of the Maps reviews pager (what the Reviews tab calls while scrolling), newest first."""
+    return ("/maps/rpc/listugcposts?authuser=0&hl=vi&gl=vn&pb="
+            f"!1m6!1s{hexid}!6m4!4m1!1e1!4m1!1e3!2m2!1i{int(n)}!2s{token or ''}!5m2!1s{sid}!7e81"
+            "!8m9!2b1!3b1!5b1!7b1!12m4!1b1!2b1!4m1!1e1!11m0!13m1!1e1")
+
+
+def parse_ugc(text):
+    """listugcposts body (")]}'" + JSON) -> (rows, next_token|None). Raises ValueError on a non-JSON body."""
+    t = (text or "").lstrip()
+    if t.startswith(")]}'"):
+        t = t[4:]
+    d = json.loads(t)
+    rows = [x for x in (review_row(g(r, 0)) for r in (g(d, 2) or []) if isinstance(r, list)) if x and x.get("id")]
+    tok = g(d, 1)
+    return rows, (tok if isinstance(tok, str) and tok else None)
+
+
+def more_reviews(fetch, hexid, have, cap=None, want=None, page=UGC_PAGE, max_pages=UGC_MAX_PAGES):
+    """Page the reviews of `hexid` until `cap` rows (or `want`, Google's review count) or the source runs out.
+
+    fetch(path) -> (http_status, body_text): a same-origin GET in the signed-in Chrome. `have` (the preview rows)
+    keeps its place; new ids are appended. Best effort: any problem keeps what we have.
+    Returns (rows newest first, note) with note like "ugc+32/2p", "ugc_http403", "ugc_err:ValueError"."""
+    cap = REVIEW_CAP if cap is None else cap
+    goal = min(cap, want) if isinstance(want, int) and want > 0 else cap
+    rows = [r for r in (have or []) if r.get("id")][:cap]
+    seen = {r["id"] for r in rows}
+    if not hexid or len(rows) >= goal:
+        return _newest_first(rows), "ugc_skip"
+    tok, pages, added, note = "", 0, 0, None
+    while len(rows) < goal and pages < max_pages:
+        try:
+            status, body = fetch(ugc_path(hexid, tok, page))
+        except Exception as e:
+            note = f"ugc_err:{type(e).__name__}"; break
+        pages += 1
+        if status != 200:
+            note = f"ugc_http{status}"; break
+        try:
+            got, tok = parse_ugc(body)
+        except (ValueError, TypeError) as e:
+            note = f"ugc_err:{type(e).__name__}"; break
+        new = [r for r in got if r["id"] not in seen]
+        for r in new:
+            if len(rows) >= cap:
+                break
+            rows.append(r); seen.add(r["id"]); added += 1
+        if not new or not tok:
+            break
+    return _newest_first(rows), note or f"ugc+{added}/{pages}p"
 
 
 def about(p):
