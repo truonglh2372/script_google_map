@@ -21,7 +21,10 @@ Contract: the heartbeat table merged in web #1024 (`crawler_heartbeats`) and the
 - At most one heartbeat every AQD_HEARTBEAT_EVERY_MIN minutes (default 15) unless force=True. Send one when idle too:
   the report calls a crawler silent after OPS_REPORT_CRAWLER_SILENT_HOURS without a heartbeat.
 """
-import json, os, re, shutil, socket, time, urllib.error, urllib.request, uuid
+import json, os, re, shutil, socket, sys, time, urllib.error, urllib.request, uuid
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import origin_pin  # noqa: E402
 
 PATH = "/v1/ingest/heartbeats"
 STATUSES = ("running", "idle", "blocked", "error")
@@ -44,7 +47,8 @@ def _int_env(name, default):
 
 
 def _read_env_file(path):
-    """KEY=VALUE lines of a creds.env-style file (only AQD_BASE / AQD_INGEST_TOKEN are used); {} if unreadable."""
+    """KEY=VALUE lines of a creds.env-style file (only AQD_BASE / AQD_INGEST_TOKEN / AQD_ORIGIN_IP are used); {} if
+    unreadable."""
     out = {}
     try:
         with open(path, encoding="utf-8") as f:
@@ -52,7 +56,7 @@ def _read_env_file(path):
                 line = line.strip()
                 if line and not line.startswith("#") and "=" in line:
                     key, value = line.split("=", 1)
-                    if key.strip() in ("AQD_BASE", "AQD_INGEST_TOKEN"):
+                    if key.strip() in ("AQD_BASE", "AQD_INGEST_TOKEN", "AQD_ORIGIN_IP"):
                         out[key.strip()] = value.strip().strip('"').strip("'")
     except OSError:
         pass
@@ -78,6 +82,14 @@ class Heartbeat:
             token = os.environ.get("AQD_INGEST_TOKEN") or file_env.get("AQD_INGEST_TOKEN") or ""
         self.token = token.strip()
         self.enabled = bool(self.token) and os.environ.get("AQD_HEARTBEAT", "1").strip() != "0"
+        self.pin_error = None
+        if self.enabled:
+            # AQD_ORIGIN_IP (environment, else creds.env): straight to the origin, TLS still checked against the host.
+            # A bad value turns the heartbeat off instead of breaking the crawler.
+            try:
+                origin_pin.install(self.base, os.environ.get("AQD_ORIGIN_IP") or file_env.get("AQD_ORIGIN_IP") or "")
+            except origin_pin.OriginPinError as e:
+                self.enabled, self.pin_error = False, str(e)
         self.every = _int_env("AQD_HEARTBEAT_EVERY_MIN", 15) * 60
         self.opener = opener or urllib.request.urlopen
         self.now = now
