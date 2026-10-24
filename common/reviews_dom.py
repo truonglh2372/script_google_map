@@ -242,11 +242,16 @@ _JS_TAB = """()=>{const t=[...document.querySelectorAll('button[role=tab]')].fin
   if(!t) return false; if(t.getAttribute('aria-selected')!=='true') t.click(); return true}"""
 # Sort menu (an_uong_quanh_day#1110). Google serves the panel per account/region (Mac: lang="vi", Admin: lang="vi-RU",
 # narrower window) so labels, Unicode form and render timing differ. Find things by structure first, text second:
-#   button: aria-haspopup button ABOVE the first review card, outside cards; by label (any known language) ->
-#           class FNe70d -> the nearest such button above the cards.
+#   button: an aria-haspopup button outside the review cards, ANYWHERE in the page, by label (any known language) ->
+#           class FNe70d; only as a last resort the nearest aria-expanded popup button ABOVE the first card.
+#           Waited for (polling, up to SORT_WAIT_MS): right after the tab click the old Overview, with its own preview
+#           cards (div.jftiEf[data-review-id]) and no sort button, is still in the DOM for ~1 s (observed on Admin
+#           2026-10-25), so "a card exists" does not mean "the Reviews panel is rendered".
 #   item:   "newest" label (NFC) -> data-index=1 -> 2nd radio item; only in a menu of >= 3 radio items (a sort menu).
 # Clicks are real mouse clicks (Playwright), the menu is awaited (polling, up to 4 s, one retry), and success is
 # VERIFIED by the button label changing to "newest" (or at least away from the old label).
+# A miss returns "no_btn:<counts>" (see no_btn_reason) and prints one "sort_diag" line with the popup candidates.
+SORT_WAIT_MS = 6000
 SORT_LABELS = ["Sắp xếp", "Phù hợp nhất", "Mới nhất", "Xếp hạng cao nhất", "Xếp hạng thấp nhất",
                "Sort", "Most relevant", "Newest", "Highest rating", "Lowest rating",
                "Сортировка", "Самые релевантные", "Сначала новые", "Новые", "Сначала с высокой оценкой",
@@ -264,10 +269,11 @@ def _label(n):
     return _nfc(n.attrs.get("aria-label")) or _nfc(n.text())
 
 
-def pick_sort_button(root):
-    """Python twin of _JS_FIND_SORT over a parsed page (tests): the sort button node or None."""
+def pick_sort_button(root, strict=False):
+    """Python twin of _JS_FIND_SORT over a parsed page (tests): the sort button node or None.
+    strict=True: only a label / class match (what the driver waits for), never the positional fallback."""
     nodes = list(root.iter())
-    first = next((i for i, n in enumerate(nodes) if n.tag == "div" and "jftiEf" in n.cls() and n.attrs.get("data-review-id")), len(nodes))
+    first = next((i for i, n in enumerate(nodes) if n.tag == "div" and "jftiEf" in n.cls() and n.attrs.get("data-review-id")), None)
     def in_card(n):
         p = n.parent
         while p is not None:
@@ -275,10 +281,22 @@ def pick_sort_button(root):
                 return True
             p = p.parent
         return False
-    bs = [n for n in nodes[:first] if n.tag == "button" and n.attrs.get("aria-haspopup") in ("true", "menu") and not in_card(n)]
-    return (next((b for b in bs if _SORT_RE.search(_label(b)) or _SORT_RE.search(_nfc(b.text()))), None)
-            or next((b for b in bs if "FNe70d" in b.cls()), None)
-            or next((b for b in reversed(bs) if "aria-expanded" in b.attrs), None))
+    bs = [(i, n) for i, n in enumerate(nodes)
+          if n.tag == "button" and n.attrs.get("aria-haspopup") in ("true", "menu") and not in_card(n)]
+    hit = (next((b for _, b in bs if _SORT_RE.search(_label(b)) or _SORT_RE.search(_nfc(b.text()))), None)
+           or next((b for _, b in bs if "FNe70d" in b.cls()), None))
+    if hit is not None or strict or first is None:
+        return hit
+    return next((b for i, b in reversed(bs) if i < first and "aria-expanded" in b.attrs), None)
+
+
+def no_btn_reason(d):
+    """Compact, log-safe miss reason (no commas, parentheses or spaces: the review-log note and the rollout verifier
+    split on ',unsorted' and '(...)'): popup candidates outside cards / above / below the first card / inside cards,
+    FNe70d present, number of cards."""
+    d = d or {}
+    return "no_btn:pop%d-above%d-below%d-incard%d-fne%d-cards%d" % tuple(
+        int(d.get(k) or 0) for k in ("pop", "above", "below", "incard", "fne", "cards"))
 
 
 def pick_newest_item(root):
@@ -295,20 +313,31 @@ def pick_newest_item(root):
 _JS_RX = ("const N=s=>(s||'').normalize('NFC').trim();"
           f"const SORT=new RegExp({json.dumps(_SORT_RE.pattern)},'i'), NEW=new RegExp({json.dumps(_NEWEST_RE.pattern)},'i');"
           "const L=b=>N(b.getAttribute('aria-label'))||N(b.textContent);")
-_JS_FIND_SORT = ("function(){" + _JS_RX +
+_JS_FIND_SORT = ("function(strict){" + _JS_RX +
     "const c=document.querySelector('div.jftiEf[data-review-id]');"
-    "const bs=[...document.querySelectorAll('button[aria-haspopup=true],button[aria-haspopup=menu]')].filter(b=>"
-    "!b.closest('div.jftiEf')&&(!c||(b.compareDocumentPosition(c)&Node.DOCUMENT_POSITION_FOLLOWING)));"
-    "return bs.find(b=>SORT.test(L(b))||SORT.test(N(b.textContent)))||bs.find(b=>b.classList.contains('FNe70d'))"
-    "||[...bs].reverse().find(b=>b.hasAttribute('aria-expanded'))||null}")
-_JS_SORT_BTN = "()=>(" + _JS_FIND_SORT + ")()"
+    "const bs=[...document.querySelectorAll('button[aria-haspopup=true],button[aria-haspopup=menu]')].filter(b=>!b.closest('div.jftiEf'));"
+    "const hit=bs.find(b=>SORT.test(L(b))||SORT.test(N(b.textContent)))||bs.find(b=>b.classList.contains('FNe70d'))||null;"
+    "if(hit||strict||!c) return hit;"
+    "return bs.filter(b=>b.compareDocumentPosition(c)&Node.DOCUMENT_POSITION_FOLLOWING).reverse()"
+    ".find(b=>b.hasAttribute('aria-expanded'))||null}")
+_JS_SORT_READY = "()=>!!(" + _JS_FIND_SORT + ")(true)"
+_JS_SORT_DIAG = ("()=>{const c=document.querySelector('div.jftiEf[data-review-id]');"
+    "const all=[...document.querySelectorAll('button[aria-haspopup=true],button[aria-haspopup=menu]')];"
+    "const out=all.filter(b=>!b.closest('div.jftiEf'));"
+    "const pos=b=>!c?'nocard':(b.compareDocumentPosition(c)&Node.DOCUMENT_POSITION_FOLLOWING?'above':'below');"
+    "return {pop:out.length,above:out.filter(b=>pos(b)==='above').length,below:out.filter(b=>pos(b)==='below').length,"
+    "incard:all.length-out.length,fne:document.querySelectorAll('button.FNe70d').length,"
+    "cards:document.querySelectorAll('div.jftiEf[data-review-id]').length,lang:document.documentElement.lang||'',"
+    "list:out.slice(0,8).map(b=>({cls:String(b.className||'').trim().slice(0,30),pos:pos(b),"
+    "exp:b.getAttribute('aria-expanded'),label:(b.getAttribute('aria-label')||b.textContent||'').normalize('NFC').trim().slice(0,30)}))}}")
+_JS_SORT_BTN = "()=>(" + _JS_FIND_SORT + ")(false)"
 _JS_IS_NEWEST = "(b)=>{" + _JS_RX + "return NEW.test(L(b))||NEW.test(N(b.textContent))}"
 _JS_ITEMS = ("()=>{const it=[...document.querySelectorAll('[role=menuitemradio],[role=menuitem],[role=option]')].filter(x=>x.offsetParent!==null||x.getClientRects().length);"
              "const r=it.filter(x=>x.getAttribute('role')!=='menuitem'); return r.length?r:it}")
 _JS_MENU_READY = "()=>(" + _JS_ITEMS + ")().length>=3"
 _JS_PICK = ("()=>{" + _JS_RX + "const r=(" + _JS_ITEMS + ")(); if(r.length<3) return null;"
             "return r.find(x=>NEW.test(N(x.textContent)))||r.find(x=>x.getAttribute('data-index')==='1')||r[1]}")
-_JS_APPLIED = ("(before)=>{" + _JS_RX + "const b=(" + _JS_FIND_SORT + ")(); if(!b) return false; const l=L(b);"
+_JS_APPLIED = ("(before)=>{" + _JS_RX + "const b=(" + _JS_FIND_SORT + ")(false); if(!b) return false; const l=L(b);"
                "return NEW.test(l)||NEW.test(N(b.textContent))||(!!l&&l!==before)}")
 
 
@@ -357,11 +386,21 @@ class PageDriver:
         except Exception:
             pass
 
+    def _no_btn(self):
+        try:
+            d = self.pg.evaluate(_JS_SORT_DIAG) or {}
+        except Exception:
+            d = {}
+        print("sort_diag " + json.dumps({k: d.get(k) for k in ("pop", "above", "below", "incard", "fne", "cards", "lang", "list")},
+                                        ensure_ascii=True), flush=True)
+        return no_btn_reason(d)
+
     def sort_newest(self):
         """True when the panel is verified sorted newest-first, else a short reason string (never raises on misses)."""
+        self._poll(_JS_SORT_READY, timeout=SORT_WAIT_MS)   # the Reviews panel replaces the Overview ~1 s after the tab click
         btn = self.pg.evaluate_handle(_JS_SORT_BTN).as_element()
         if not btn:
-            return "no_btn"
+            return self._no_btn()
         if btn.evaluate(_JS_IS_NEWEST):
             return True
         before = btn.evaluate("b=>(b.getAttribute('aria-label')||b.textContent||'').normalize('NFC').trim()")
