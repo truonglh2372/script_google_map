@@ -1,0 +1,82 @@
+[
+ {
+  "id": "RV_TEST_02",
+  "author": "Preview 1",
+  "rating": 1,
+  "text": "preview text 1",
+  "published_at": "2026-07-27T22:29:08+07:00",
+  "relative_date": "2 tháng trước",
+  "language": "vi",
+  "photo_urls": []
+ },
+ {
+  "id": "RV_TEST_07",
+  "author": "Preview 2",
+  "rating": 5,
+  "text": "preview text 2",
+  "published_at": "2026-06-03T18:32:26+07:00",
+  "relative_date": "4 tháng trước",
+  "language": "vi",
+  "photo_urls": []
+ },
+ {
+  "id": "RV_TEST_01",
+  "author": "Preview 3",
+  "rating": 1,
+  "text": "preview text 3",
+  "published_at": "2026-04-29T12:17:44+07:00",
+  "relative_date": "5 tháng trước",
+  "language": "vi",
+  "photo_urls": []
+ },
+ {
+  "id": "RV_TEST_03",
+  "author": "Preview 4",
+  "rating": 1,
+  "text": "preview text 4",
+  "published_at": "2026-04-22T11:09:35+07:00",
+  "relative_date": "6 tháng trước",
+  "language": "vi",
+  "photo_urls": []
+ },
+ {
+  "id": "RV_TEST_04",
+  "author": "Preview 5",
+  "rating": 2,
+  "text": "preview text 5",
+  "published_at": "2026-01-27T20:53:30+07:00",
+  "relative_date": "8 tháng trước",
+  "language": "vi",
+  "photo_urls": []
+ },
+ {
+  "id": "RV_TEST_05",
+  "author": "Preview 6",
+  "rating": 5,
+  "text": "preview text 6",
+  "published_at": "2025-08-29T20:38:21+07:00",
+  "relative_date": "Thời gian chỉnh sửa: một năm trước",
+  "language": "vi",
+  "photo_urls": []
+ },
+ {
+  "id": "RV_TEST_06",
+  "author": "Preview 7",
+  "rating": 5,
+  "text": "preview text 7",
+  "published_at": "2024-11-11T18:32:58+07:00",
+  "relative_date": "một năm trước",
+  "language": "vi",
+  "photo_urls": []
+ },
+ {
+  "id": "RV_TEST_08",
+  "author": "Preview 8",
+  "rating": 5,
+  "text": "preview text 8",
+  "published_at": "2024-11-06T01:01:46+07:00",
+  "relative_date": "một năm trước",
+  "language": "vi",
+  "photo_urls": []
+ }
+]

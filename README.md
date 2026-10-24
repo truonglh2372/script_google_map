@@ -277,7 +277,7 @@ bash tools/test_installer_mac.sh        # installer Mac: prompt/mặc định, l
 
 | Biến | Mặc định | Ý nghĩa |
 |---|---|---|
-| `AQD_MAX_REVIEWS` | `50` | Số review Google giữ mỗi quán (#1083). Preview chỉ có 5–8, phần còn lại phân trang `listugcposts` **trong Chrome đã đăng nhập** (chưa đăng nhập Google trả 403 → giữ review của preview). |
+| `AQD_MAX_REVIEWS` | `50` | Số review Google giữ mỗi quán (#1083). Preview chỉ có 5–8, phần còn lại đọc bằng cách **mở tab Bài đánh giá → sắp xếp Mới nhất → cuộn panel** trong tab Chrome đã đăng nhập của crawler (`common/reviews_dom.py`: chờ 1,5–3 s ngẫu nhiên, tối đa 8 lần cuộn, dừng khi đủ số này / đủ số review của Google / không tải thêm). Không gọi RPC Google tự dựng (`listugcposts` đã bỏ vì luôn 403). Lỗi gì cũng giữ review của preview. |
 | `AQD_GOOGLE_REVIEWS_PUSH_MAX` | `= AQD_MAX_REVIEWS` | Số review gửi lên `PUT google_reviews`. Server cũ còn giới hạn 20 (`validate.rb`): gặp 422 thì gửi lại 20 review mới nhất và nhớ giới hạn 20 cho tới hết tiến trình — không hỏng gì trước khi deploy web. |
 | `AQD_PHOTO_RETRY_BACKOFF_MIN` | `15` | #1084: quán **có ảnh được chọn nhưng server nhận 0 ảnh** không còn là OK/SAFE_DONE mà là `ERROR PHOTOS_UNSENT`, vẫn draft, ghi `photo_retry.json`; thử lại sau 15, 30, 60… phút (tối đa 6 giờ). |
 | `AQD_PHOTO_RETRY_MAX` | `3` | Sau 3 lần thử lại vẫn 0 ảnh → lần cuối hoàn tất quán không ảnh (`WARN photos_unsent_gave_up`, entry `gave_up`). `alt.py` gọi `safe_run.py push --photo-retry` khi có quán đến hạn. |

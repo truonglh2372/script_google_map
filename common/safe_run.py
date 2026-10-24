@@ -473,29 +473,22 @@ def cmd_prep(args):
     log(f"PREP END prepared {done}")
 
 
-_JS_GET = """async (path)=>{try{const r=await fetch(path,{credentials:'include'});return {status:r.status,body:await r.text()}}
-catch(e){return {status:0,body:String(e)}}}"""
-
-
-def _browser_get(path):
-    r = _PW["pg"].evaluate(_JS_GET, path) or {}
-    return r.get("status"), r.get("body") or ""
-
-
 def _more_reviews(info):
-    """#1083: page the Reviews of a place in the signed-in Chrome up to mf.REVIEW_CAP (AQD_MAX_REVIEWS, default 50).
-    Best effort: any problem keeps the preview's 5-8 reviews and never fails the place."""
+    """#1083 / an_uong_quanh_day#1108: read more Google reviews by scrolling the Reviews panel of the place in the
+    crawler's own signed-in tab, up to mf.REVIEW_CAP (AQD_MAX_REVIEWS, default 50) or Google's review count.
+    No hand-built Google RPC. Best effort: any problem keeps the preview's 5-8 reviews and never fails the place."""
+    import reviews_dom as rd
     meta = info.get("_meta") or {}
     ex = meta.get("extra")
     if not isinstance(ex, dict) or "pg" not in _PW:
         return
     have = ex.get("reviews") or []
     try:
-        rows, note = mf.more_reviews(_browser_get, meta.get("hex_id"), have, cap=mf.REVIEW_CAP,
-                                     want=ex.get("google_review_count"))
+        drv = rd.PageDriver(_PW["pg"], rd.place_url(info, meta.get("hex_id")))
+        rows, note = rd.page_reviews(drv, have, cap=mf.REVIEW_CAP, want=ex.get("google_review_count"))
         ex["reviews"] = rows
     except Exception as e:
-        note = f"ugc_err:{type(e).__name__}"
+        note = f"dom_err:{type(e).__name__}"
     ex["reviews_paging"] = note
     print(f"reviews {len(have)} -> {len(ex.get('reviews') or [])} ({note})", flush=True)
 
