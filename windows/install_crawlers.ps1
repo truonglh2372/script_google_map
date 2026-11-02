@@ -50,6 +50,8 @@ function Mask($v) { if (-not $v) { '(trong)' } elseif ($v.Length -gt 28) { $v.Su
 $curW = GetKey 'SLACK_CRAWLER_WEBHOOK_URL'; $curN = GetKey 'AQD_HOST_LABEL'; $curM = GetKey 'SLACK_ALERT_MENTION'
 if (-not $curN) { $curN = $env:COMPUTERNAME }
 $Name = if ($env:AQD_SET_NAME) { $env:AQD_SET_NAME } else { '' }
+if (-not $Quiet -and -not [Environment]::UserInteractive) { $Quiet = $true }
+if (-not $Quiet -and ([Environment]::GetCommandLineArgs() -match '^-NonI')) { $Quiet = $true; Say 'no console: keeping crawler.env values' }
 if (-not $Quiet) {
   while ($true) {
     $r = Read-Host "Webhook Slack (https://hooks.slack.com/services/...), Enter = giu [$(Mask $curW)]"
