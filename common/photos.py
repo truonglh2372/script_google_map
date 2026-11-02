@@ -6,7 +6,7 @@ Gallery policy: collect ONLY from relevant Maps category tabs (food/drink, menu,
 storefront/exterior, by-owner). Never the "All" tab. Optional CLIP filter is applied in safe_run.
 """
 import json, os, random, re, sys, time
-R = "C:/aqd"
+R = os.environ.get("AQD_ROOT") or ("C:/aqd" if sys.platform.startswith("win") else os.path.expanduser("~/aqd"))
 sys.path.insert(0, R)
 for l in open(R + "/creds.env", encoding="utf-8"):
     l = l.strip()
