@@ -11,7 +11,8 @@ Each crawler posts straight to ONE shared Slack channel through an Incoming Webh
     <state dir>/slack_state.json so it holds across restarts and across short-lived processes.
 
 Config (never committed, never logged):
-  SLACK_CRAWLER_WEBHOOK_URL   the webhook; empty -> the file SLACK_CRAWLER_WEBHOOK_FILE, default
+  SLACK_CRAWLER_WEBHOOK_URL   the webhook; empty -> the file SLACK_CRAWLER_WEBHOOK_FILE, else ~/aqd/crawler.env
+                              (Windows C:\\aqd\\crawler.env) when it exists, else
                               ~/.config/aqd/slack_webhook (Mac/Linux) or %APPDATA%\\aqd\\slack_webhook (Windows).
                               Missing -> one warning in the log, the crawler keeps running, nothing is sent.
   SLACK_ALERT_MENTION         a Slack user id (U.../W...) mentioned on red alerts; empty -> no mention.
@@ -54,9 +55,21 @@ def _float_env(env, name, default):
         return default
 
 
+def crawler_env_file(env=os.environ):
+    """The per-machine editable file (an_uong_quanh_day#1388): ~/aqd/crawler.env, C:\\aqd\\crawler.env on Windows.
+    KEY=VALUE lines, # comments. AQD_CRAWLER_ENV overrides the path."""
+    if env.get("AQD_CRAWLER_ENV"):
+        return env["AQD_CRAWLER_ENV"]
+    return r"C:\aqd\crawler.env" if os.name == "nt" else os.path.join(os.path.expanduser("~"), "aqd", "crawler.env")
+
+
 def default_secret_file(env=os.environ):
+    """SLACK_CRAWLER_WEBHOOK_FILE, else crawler.env when it exists, else the old ~/.config/aqd/slack_webhook.
+    Read again by every Notifier (crawler start, every watchdog run)."""
     if env.get("SLACK_CRAWLER_WEBHOOK_FILE"):
         return env["SLACK_CRAWLER_WEBHOOK_FILE"]
+    if os.path.isfile(crawler_env_file(env)):
+        return crawler_env_file(env)
     if os.name == "nt":
         return os.path.join(env.get("APPDATA") or os.path.expanduser("~"), "aqd", "slack_webhook")
     return os.path.join(os.path.expanduser("~"), ".config", "aqd", "slack_webhook")

@@ -83,6 +83,17 @@ class Config(Base):
         n = sn.Notifier("foody", self.dir, env={"SLACK_CRAWLER_WEBHOOK_FILE": f}, now=self.clock, sender=lambda *a: 1)
         self.assertEqual((n.host, n.enabled, sn.mention(n.env)), ("Admin", True, "<@U0FILE> "))
 
+    def test_crawler_env_file_is_read_when_present(self):
+        f = os.path.join(self.dir, "crawler.env")
+        env = {"AQD_CRAWLER_ENV": f}
+        self.assertNotEqual(sn.default_secret_file(env), f)
+        open(f, "w").write("# sửa tay\nSLACK_CRAWLER_WEBHOOK_URL=https://env-file/x\nAQD_HOST_LABEL=Admin\nSLACK_ALERT_MENTION=\n")
+        self.assertEqual(sn.default_secret_file(env), f)
+        conf = sn.settings(env)
+        self.assertEqual((conf["SLACK_CRAWLER_WEBHOOK_URL"], conf["AQD_HOST_LABEL"]), ("https://env-file/x", "Admin"))
+        self.assertEqual(sn.mention(env), "")
+        self.assertEqual(sn.default_secret_file(dict(env, SLACK_CRAWLER_WEBHOOK_FILE="/x")), "/x")
+
     def test_missing_webhook_sends_nothing_and_keeps_going(self):
         n = self.notifier(env={"SLACK_CRAWLER_WEBHOOK_URL": ""})
         self.assertFalse(n.enabled)
