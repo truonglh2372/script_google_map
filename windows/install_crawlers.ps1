@@ -63,7 +63,8 @@ if (-not $Quiet) {
 if ($Webhook) { SetKey 'SLACK_CRAWLER_WEBHOOK_URL' $Webhook; Say 'webhook saved (hidden)' }
 if (-not $Name) { $Name = $curN }
 SetKey 'AQD_HOST_LABEL' $Name
-icacls $EnvF /inheritance:r /grant:r "$($env:USERNAME):F" | Out-Null
+$Sid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+icacls $EnvF /inheritance:r /grant:r "*${Sid}:F" | Out-Null   # owner only (by SID: a user named like the PC is ambiguous)
 if (-not (GetKey 'SLACK_CRAWLER_WEBHOOK_URL')) { Say "WARNING: SLACK_CRAWLER_WEBHOOK_URL is empty in $EnvF - nothing will be sent" }
 Say "host label: $Name"
 # Older code reads %APPDATA%\aqd\slack_webhook: hard-link it to crawler.env (one file to edit).
