@@ -65,8 +65,7 @@ def require_signin():
         log("REFUSE TO RUN: the Chrome profile on the CDP port is NOT signed in to Google, so Maps serves the limited "
             "view (thin data: fewer fields/photos/reviews, no types). Sign in to Google in that Chrome window, then "
             "restart; nothing was fetched or pushed.")
-        hb("note", "login_required", "Chrome not signed in to Google; crawler refuses thin Maps data")
-        hb("beat", "Chrome chưa đăng nhập Google - dừng", status="blocked", force=True)
+        hb("error", "signin_required", "Chrome trên cổng CDP chưa đăng nhập Google — không lấy dữ liệu Maps thiếu")
         return False
     return True
 
@@ -91,13 +90,12 @@ def free_gb(path=None):
 
 
 def disk_ok(where=""):
-    """True when the data disk has >= AQD_MIN_FREE_GB free (0 disables the guard). Low -> log + heartbeat note."""
+    """True when the data disk has >= AQD_MIN_FREE_GB free (0 disables the guard). Low -> log + Slack alert (#1388)."""
     free = free_gb()
     if MIN_FREE_GB <= 0 or free is None or free >= MIN_FREE_GB:
         return True
     log(f"DISK LOW {free:.1f} GB free < {MIN_FREE_GB:g} GB{(' at ' + where) if where else ''}; pause {DISK_PAUSE_MIN:g} min")
-    hb("note", "disk_full", f"{free:.1f} GB free < {MIN_FREE_GB:g} GB")
-    hb("beat", f"tạm ngừng: ổ đĩa còn {free:.1f} GB", status="blocked", force=True)
+    hb("error", "disk_low", f"Ổ dữ liệu còn {free:.1f} GB (< {MIN_FREE_GB:g} GB) → tạm ngừng cào/đẩy")
     return False
 
 
@@ -226,19 +224,26 @@ def log(s):
     open(LOG, "a", encoding="utf-8").write(line + "\n"); print(line, flush=True)
 
 
-try:  # crawler heartbeat for the daily Slack ops report (an_uong_quanh_day#1021); no AQD_INGEST_TOKEN -> no-op
-    import heartbeat as _heartbeat
-    HB = _heartbeat.Heartbeat("script_google_map", ROOT)
-except Exception:  # an old install without heartbeat.py keeps working
+try:  # Slack status/alerts straight to the shared webhook (an_uong_quanh_day#1388); no webhook -> no-op.
+    import slack_notify as _slack  # counts + alerts only; the 4h report/stuck timer runs in alt.py (same ROOT state)
+    HB = _slack.Notifier("gmaps", ROOT)
+except Exception:  # an old install without slack_notify.py keeps working
     HB = None
 
 
 def hb(method, *args, **kwargs):
-    """Best effort: a heartbeat problem never stops a pass and is never logged with the token."""
+    """Best effort: a Slack problem never stops a pass and the webhook URL is never logged."""
     try:
         return getattr(HB, method)(*args, **kwargs) if HB else None
     except Exception:
         return None
+
+
+def hb_result(kind, msg):
+    """One finished place -> Slack counts: ok/warn = a place done (+photos=+N), anything else = an error."""
+    ok = kind in ("ok", "warn")
+    m = re.search(r"photos=\+(\d+)", msg or "") if ok else None
+    hb("record_place", ok, photos=int(m.group(1)) if m else 0)
 
 
 class Overload(Exception):
@@ -656,8 +661,9 @@ def cmd_push(args):
                 tries += 1
                 log(f"#{rid} OVERLOAD ({e}) try {tries}")
                 if tries >= 2:
-                    hb("record_place", False); hb("note", "other", f"server overload: {str(e)[:150]}")
-                    hb("beat", f"#{rid} STOP: server overload", status="error", force=True)
+                    hb("record_place", False)
+                    hb("error", "http_503", f"#{rid} server quá tải 2 lần: {str(e)[:150]}",
+                       action="crawler đã tự tạo file STOP; kiểm tra server rồi xoá STOP", severe=True)
                     log(f"#{rid} second failure -> STOP ENTIRELY"); open(PROG, "a", encoding="utf-8").write(f"{rid} | safe | STOPPED overload: {e}\n"); open(STOPFILE, "w", encoding="utf-8").write(str(e)); return "STOP"
                 time.sleep(COOLDOWN)
             except Exception as e:
@@ -676,7 +682,7 @@ def cmd_push(args):
         info = json.load(open(os.path.join(DATA_DIR, str(rid), "info.json"), encoding="utf-8"))
         line = f"{rid} | safe | {info.get('name','')} | {info.get('category')} | {kind.upper()} {msg} - {time.strftime('%F %H:%M')}"
         open(PROG, "a", encoding="utf-8").write(line + "\n"); log(f"#{rid} {kind.upper()} {msg}")
-        hb("record_result", kind, msg); hb("beat", f"#{rid} {kind}")
+        hb_result(kind, msg)
         if n % 20 == 0:
             log(f"health: reqs={G.n} avg={G.tt/max(1,G.n):.2f}s max={G.max:.1f}s"); time.sleep(30)
     if len(ids) > 1: log(f"PUSH END {n} places; reqs={G.n} avg={G.tt/max(1,G.n):.2f}s max={G.max:.1f}s")
@@ -830,8 +836,8 @@ def cmd_run(args):
                 info, reason = build_info(r)
             except mf.Blocked as e:
                 log(f"#{rid} Maps BLOCKED {e}; back off 2h")
-                hb("note", "ip_blocked", f"Maps BLOCKED: {str(e)[:150]}")
-                hb("beat", "Maps BLOCKED, back off 2h", status="blocked", force=True)
+                hb("error", "captcha" if re.search(r"captcha|unusual", str(e), re.I) else "google_cutoff",
+                   f"#{rid} Maps chặn: {str(e)[:150]} → nghỉ 2 giờ")
                 if os.environ.get("AQD_ALT"):
                     open(ROOT + "/fetch_backoff.txt", "w", encoding="utf-8").write(str(time.time() + 7200)); sys.exit(3)
                 time.sleep(7200); continue
@@ -845,8 +851,7 @@ def cmd_run(args):
                     if streak >= 3:
                         m = BACKOFF_MIN[min(level, 2)]; level += 1
                         log(f"Maps empty page {streak} in a row (last #{rid}); pause Maps {m} min (level {level})")
-                        hb("note", "rate_limited", f"Maps empty page {streak} in a row; pause {m} min")
-                        hb("beat", f"Maps paused {m} min", status="blocked", force=True)
+                        hb("error", "rate_limited", f"Maps trả trang rỗng {streak} lần liên tiếp → nghỉ {m} phút")
                         if os.environ.get("AQD_ALT"):
                             open(ROOT + "/fetch_backoff.txt", "w", encoding="utf-8").write(str(time.time() + m * 60)); sys.exit(3)
                         if not nap(m * 60): log("STOP file; end run"); break
@@ -860,13 +865,12 @@ def cmd_run(args):
                 streak += 1
                 log(f"#{rid} THIN Maps data (via={info['_maps'].get('via')} photos={len(info['photo_urls'])}) -> NOT pushed, "
                     f"retry later ({streak} in a row)")
-                hb("record_result", "error", f"#{rid} thin Maps data, not pushed")
+                hb("record_place", False)
                 if streak >= 3:
                     if require_signin() is False and os.environ.get("AQD_ALT"): sys.exit(EXIT_SIGNED_OUT)
                     m = BACKOFF_MIN[min(level, 2)]; level += 1
                     log(f"Maps thin {streak} in a row (last #{rid}); pause Maps {m} min (level {level})")
-                    hb("note", "rate_limited", f"Maps thin {streak} in a row; pause {m} min")
-                    hb("beat", f"Maps paused {m} min (thin)", status="blocked", force=True)
+                    hb("error", "rate_limited", f"Maps trả dữ liệu thiếu {streak} lần liên tiếp → nghỉ {m} phút")
                     if os.environ.get("AQD_ALT"):
                         open(ROOT + "/fetch_backoff.txt", "w", encoding="utf-8").write(str(time.time() + m * 60)); sys.exit(3)
                     if not nap(m * 60): log("STOP file; end run"); break
@@ -896,8 +900,7 @@ def cmd_run(args):
         if fetched and streak >= 3:
             m = BACKOFF_MIN[min(level, 2)]; level += 1
             log(f"Maps truly limited {streak} in a row (last #{rid}: {lim}); pause Maps {m} min (level {level})")
-            hb("note", "rate_limited", f"Maps limited {streak} in a row; pause {m} min")
-            hb("beat", f"Maps paused {m} min", status="blocked", force=True)
+            hb("error", "rate_limited", f"Maps giới hạn {streak} lần liên tiếp → nghỉ {m} phút")
             if os.environ.get("AQD_ALT"):
                 open(ROOT + "/fetch_backoff.txt", "w", encoding="utf-8").write(str(time.time() + m * 60)); sys.exit(3)
             if not nap(m * 60): log("STOP file; end run"); break

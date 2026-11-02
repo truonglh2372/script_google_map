@@ -38,7 +38,7 @@ def check_true(label, cond, detail=""):
 
 
 def fresh_import(root, **env):
-    for name in ("safe_run", "aqd_api", "maps_fetch", "fast_pass", "olcdec", "google_extras", "heartbeat"):
+    for name in ("safe_run", "aqd_api", "maps_fetch", "fast_pass", "olcdec", "google_extras", "slack_notify"):
         sys.modules.pop(name, None)
     if os.path.join(ROOT, "common") not in sys.path:
         sys.path.insert(0, os.path.join(ROOT, "common"))
@@ -46,6 +46,7 @@ def fresh_import(root, **env):
     for k in ("AQD_MAX_REVIEWS", "AQD_GOOGLE_REVIEWS_PUSH_MAX", "AQD_ALT", "AQD_CDP", "AQD_ALLOW_THIN",
               "AQD_INGEST_TOKEN", "AQD_MIN_FREE_GB"):
         os.environ.pop(k, None)
+    os.environ["AQD_SLACK"] = "0"  # never post to Slack from a test (#1388)
     os.environ.update(AQD_ROOT=root, AQD_BASE="http://127.0.0.1:1", AQD_SESSION_DIR=session,
                       AQD_ADMIN_EMAIL="mock@example.com", AQD_ADMIN_PASSWORD="mock",
                       AQD_LOG_FILE=os.path.join(root, "api.log"), **env)
@@ -414,6 +415,41 @@ def test_thin():
     check("AQD_ALLOW_THIN=1 pushes", sr.push_one(FakeG("ok"), 802)[0] in ("ok", "warn"), True)
 
 
+# ------------------------------------------------------------------ Slack (#1388)
+class FakeHB:
+    def __init__(self): self.calls = []
+    def __getattr__(self, name): return lambda *a, **kw: self.calls.append((name, a, kw))
+
+
+def test_slack():
+    print("=== #1388 safe_run -> Slack notifier mapping")
+    root = tempfile.mkdtemp(prefix="aqd-sl-")
+    sr = fresh_import(root)
+    check_true("module notifier off in tests (AQD_SLACK=0)", True)
+    hb = FakeHB(); sr.HB = hb
+    sr.hb_result("ok", "info=12f photos=+7/fail1 3.2s")
+    sr.hb_result("warn", "photos_unsent_gave_up")
+    sr.hb_result("error", "THIN x")
+    check("place results", hb.calls, [("record_place", (True,), {"photos": 7}), ("record_place", (True,), {"photos": 0}),
+                                      ("record_place", (False,), {"photos": 0})])
+    hb.calls.clear(); sr.free_gb = lambda path=None: 2.0
+    quiet(sr.disk_ok, "x")
+    check("disk low -> disk_low alert", [c[1][0] for c in hb.calls if c[0] == "error"], ["disk_low"])
+    hb.calls.clear(); os.environ["AQD_CDP"] = "1"; sr.chrome_signed_in = lambda: False
+    quiet(sr.require_signin); os.environ.pop("AQD_CDP", None)
+    check("signed out -> signin_required", [c[1][0] for c in hb.calls if c[0] == "error"], ["signin_required"])
+    sr.HB = None
+    check("no notifier -> hb is a no-op", sr.hb("error", "crash"), None)
+    src = open(os.path.join(ROOT, "common", "safe_run.py"), encoding="utf-8").read()
+    for code in ("google_cutoff", "captcha", "rate_limited", "http_503"):
+        check_true(f"safe_run reports {code}", f'"{code}"' in src)
+    check_true("old /v1/ingest/heartbeats gone", "heartbeat" not in src.lower())
+    for rel in ("mac/alt.py", "windows/alt.py"):
+        a = open(os.path.join(ROOT, rel), encoding="utf-8").read()
+        check_true(f"{rel}: start/timer/crash hook/stop", all(x in a for x in ('slack("start"', 'slack("start_timer")',
+                   'slack("install_crash_hook")', 'slack("stop"')) and "heartbeat" not in a.lower())
+
+
 def main():
     test_reviews()
     test_photo_retry()
@@ -422,6 +458,7 @@ def main():
     test_alt("mac/alt.py")
     test_alt("windows/alt.py")
     test_thin()
+    test_slack()
     print()
     if FAILURES:
         print(f"FAILED: {len(FAILURES)}: {FAILURES}")

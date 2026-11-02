@@ -13,7 +13,6 @@ from unittest import mock
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(os.path.dirname(HERE), "common"))
 import origin_pin  # noqa: E402
-import heartbeat  # noqa: E402
 
 HOST = "aqd-origin.test"  # never resolvable: reaching it at all proves the pin was used
 
@@ -113,7 +112,7 @@ class OriginPinTest(unittest.TestCase):
         os.environ.pop("AQD_ORIGIN_IP", None)
         self.addCleanup(origin_pin.reset)
 
-    def url(self, server, path="/v1/ingest/heartbeats"):
+    def url(self, server, path="/up"):
         return f"https://{HOST}:{server.port}{path}"
 
     # ---- parsing ---------------------------------------------------------------------------------------------------
@@ -202,32 +201,6 @@ class OriginPinTest(unittest.TestCase):
         os.environ["AQD_ORIGIN_IP"] = "not-an-ip"
         with self.assertRaises(origin_pin.OriginPinError):
             aqd_api.AQD(base="https://anuongquanhday.com")
-
-    # ---- heartbeat -----------------------------------------------------------------------------------------------------
-    def test_heartbeat_reads_the_pin_from_creds_env(self):
-        state = tempfile.mkdtemp(dir=self.tmp)
-        creds = os.path.join(state, "creds.env")
-        with open(creds, "w") as f:
-            f.write("AQD_INGEST_TOKEN=tok\nAQD_ORIGIN_IP=127.0.0.1\n")
-        with mock.patch.dict(os.environ, {"AQD_INGEST_TOKEN": "", "AQD_BASE": ""}):
-            beat = heartbeat.Heartbeat("script_test", state, env_file=creds)
-        self.assertTrue(beat.enabled)
-        self.assertEqual("127.0.0.1", origin_pin.pinned("anuongquanhday.com"))
-
-    def test_heartbeat_with_a_bad_pin_turns_itself_off(self):
-        state = tempfile.mkdtemp(dir=self.tmp)
-        with mock.patch.dict(os.environ, {"AQD_ORIGIN_IP": "nope"}):
-            beat = heartbeat.Heartbeat("script_test", state, token="tok")
-        self.assertFalse(beat.enabled)
-        self.assertIn("AQD_ORIGIN_IP", beat.pin_error)
-        self.assertNotIn("tok", beat.pin_error)
-        self.assertFalse(beat.beat(force=True))
-
-    def test_heartbeat_without_a_pin_leaves_dns_alone(self):
-        state = tempfile.mkdtemp(dir=self.tmp)
-        beat = heartbeat.Heartbeat("script_test", state, token="tok")
-        self.assertTrue(beat.enabled)
-        self.assertIs(socket.getaddrinfo, origin_pin._REAL_GETADDRINFO)
 
 
 if __name__ == "__main__":

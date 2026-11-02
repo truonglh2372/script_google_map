@@ -28,14 +28,39 @@ Khi có `AQD_YES=1`, installer chạy hết **không hỏi gì**:
 
 Muốn đổi giá trị thì đặt biến môi trường cùng tên trước lệnh, ví dụ `AQD_ID_SUFFIXES="1 3"`, `AQD_PARITY=odd`, `AQD_ADMIN_EMAIL=...` hoặc `AQD_ADMIN_PASSWORD=...` (dùng khi máy mới chưa có `creds.env`). Bỏ `AQD_YES` thì installer quay về chế độ hỏi từng câu như mô tả bên dưới. Lưu ý: GitHub raw có thể trễ tới khoảng 5 phút sau khi push.
 
-## Heartbeat cho báo cáo Slack hằng ngày (an_uong_quanh_day#1021)
-`common/heartbeat.py` gửi `POST {AQD_BASE}/v1/ingest/heartbeats` để báo cáo Slack 08:00 biết máy này còn chạy, đã làm được bao nhiêu và gặp vấn đề gì.
-- **Bật:** thêm một dòng `AQD_INGEST_TOKEN=<token>` vào `creds.env` (installer giữ nguyên `creds.env`). Token lấy ở Admin → Ingest clients (`/admin/ingest_clients`), **mỗi máy một token**; token chỉ hiện một lần, không bao giờ được in ra log. Không có token thì heartbeat không làm gì cả.
-- **Gửi gì:** tên crawler `script_google_map`, tên máy (`CRAWLER_HOSTNAME` hoặc hostname), việc đang làm, số quán xong / ảnh đã đẩy / lỗi / lần bị giới hạn **kể từ heartbeat trước** (kèm `window_seconds`), chỗ trống ổ đĩa, trạng thái (`blocked` khi Maps chặn hoặc giới hạn, `error` khi server quá tải, `idle` khi nghỉ hoặc dừng) và ghi chú vấn đề. Không gửi mật khẩu, cookie hay URL có token.
-- **Định dạng:** đúng hợp đồng của bảng `crawler_heartbeats` (web #1024) và endpoint web #1036 (`docs/runbooks/daily-ops-report.md`): `crawler`, `host`, `status` (`running` / `idle` / `blocked` / `error`), `activity`, `range_label`, `window_seconds`, `processed_count`, `photo_count`, `dish_count`, `error_count`, `rate_limited_count`, `disk_free_mb`, `note`. Trả về 201; 422 `invalid_heartbeat` hoặc 409 thì bỏ body đó, không gửi lại.
-- **Khi nào:** sau mỗi quán (`safe_run.py`) và trong lúc `alt.py` nghỉ, nhưng tối đa 1 lần mỗi `AQD_HEARTBEAT_EVERY_MIN` phút (mặc định 15); gửi ngay khi bị chặn hoặc dừng.
-- Số đếm cộng dồn trong `heartbeat_state.json`; gửi lỗi thì giữ lại và gửi lại đúng body + `Idempotency-Key` cũ, nên server không đếm hai lần. Lỗi heartbeat không bao giờ làm dừng crawler. `AQD_HEARTBEAT=0` để tắt.
-- Test offline (không gọi mạng): `python3 tools/test_heartbeat.py`.
+## Báo cáo Slack trực tiếp (an_uong_quanh_day#1388)
+`common/slack_notify.py` gửi thẳng lên **một kênh Slack chung** qua Incoming Webhook (không qua server; heartbeat `/v1/ingest/heartbeats` đã bỏ):
+- **Mỗi 4 giờ** (`AQD_REPORT_EVERY_H`): trạng thái 🟢 chạy / 🟡 kẹt / 🔴 lỗi / ⚫ dừng, vị trí (`gmaps even, list pages 1..40, đang cào #23701..#23750`), số liệu 4 giờ qua (quán, ảnh, review, upload ok/fail), lần thành công cuối, lỗi gần nhất + việc cần làm, giờ gửi báo cáo (UTC+7).
+- **Bắt đầu / dừng** bình thường (file STOP, hết `--limit`, Ctrl+C).
+- **Cảnh báo ngay** (🔴, nhắc `SLACK_ALERT_MENTION`): `crash` (exception thoát process), `disk_low` (ổ < `AQD_DISK_MIN_GB`, mặc định 5 GB), `captcha` (Maps captcha / unusual traffic), `signin_required` (Chrome CDP chưa đăng nhập Google), `http_503` khi server quá tải 2 lần và crawler tự tạo `STOP`. Không nhắc: `google_cutoff` (Maps chặn → nghỉ 2h), `rate_limited` (3 trang rỗng / thin / giới hạn liên tiếp → nghỉ).
+- **Kẹt**: process vẫn chạy nhưng 0 quán/ảnh/review mới trong `AQD_STUCK_HOURS` (mặc định 3) giờ → 🟡.
+- **Chống spam**: tối đa 1 cảnh báo / crawler / máy / mã lỗi / `AQD_ALERT_EVERY_H` (4) giờ, lưu ở `<root>/slack_state.json` (chung cho `alt.py` và các lượt `safe_run.py`; báo cáo 4h + kẹt chạy trong `alt.py`) (giữ qua khởi động lại).
+- Gửi lỗi (mạng, timeout, HTTP) chỉ ghi 1 dòng log `[slack] gửi Slack lỗi: <loại lỗi>` (không có URL) và **không làm dừng crawler**.
+
+### Cấu hình webhook (mỗi máy, KHÔNG commit)
+Cách khuyên dùng — file secret ngoài repo (Task Scheduler / launchd đọc được, không cần biến môi trường):
+- Mac: `~/.config/aqd/slack_webhook` — `mkdir -p ~/.config/aqd && chmod 700 ~/.config/aqd`, tạo file rồi `chmod 600 ~/.config/aqd/slack_webhook`.
+- Windows: `%APPDATA%\aqd\slack_webhook` (chỉ user hiện tại đọc được).
+
+Nội dung (dòng `#` là ghi chú; chỉ một dòng URL cũng được):
+```
+SLACK_CRAWLER_WEBHOOK_URL=https://hooks.slack.com/services/...
+AQD_HOST_LABEL=Admin
+SLACK_ALERT_MENTION=U0123456789
+```
+- Biến môi trường cùng tên **thắng** file. `SLACK_CRAWLER_WEBHOOK_FILE` đổi đường dẫn file.
+- `AQD_HOST_LABEL`: tên máy hiện trong tin (Admin / Mac mini / TRUONGLE); trống → hostname.
+- `SLACK_ALERT_MENTION`: Slack user id (`U…`/`W…`) được nhắc ở tin 🔴; trống → không nhắc. Không bao giờ ghi cứng trong code.
+- Thiếu webhook → log 1 dòng cảnh báo, crawler vẫn chạy, không gửi gì. `AQD_SLACK=0` để tắt hẳn.
+- Không bao giờ in URL ra log; `slack_webhook*` có trong `.gitignore` phòng khi lỡ đặt trong repo.
+
+### Watchdog (máy tắt / process chết)
+Crawler chết thì không tự báo được; người xem thấy qua "Báo cáo lúc …" (quá 4h không có tin = có vấn đề). Watchdog của hệ điều hành chạy `<root>/watchdog.py` mỗi 15 phút: không có `<root>/STOP_ALL` mà không thấy process `alt.py` → chạy lại crawler rồi báo Slack ⚫→🟢 (đã khởi động lại) hoặc ⚫ + nhắc (không khởi động lại được); khởi động lại >3 lần/ngày → 🔴. Log: `<root>/watchdog.log`.
+- Windows (Task Scheduler `aqd_watchdog_gmaps`, cần đã chạy `windows\install.ps1` → có `C:\aqd\watchdog.py` và `Startup\aqd_fetcher.cmd`): `powershell -ExecutionPolicy Bypass -File windows\install_watchdog.ps1` · gỡ: thêm `-Uninstall`.
+- Mac (launchd `aqd.watchdog.gmaps`, cần đã có `aqd.alt`; root khác `~/aqd` thì đặt `AQD_ROOT=...`): `sh mac/install_watchdog.sh` · gỡ: `sh mac/install_watchdog.sh --uninstall`.
+- Dừng có chủ đích: tạo `<root>/STOP_ALL` trước (watchdog thấy STOP thì không khởi động lại).
+
+Test offline (chỉ server Slack giả ở 127.0.0.1): `python3 tools/test_slack_notify.py`.
 
 ## Gọi thẳng server gốc, bỏ qua Cloudflare (an_uong_quanh_day#1058)
 Đường Viettel → Cloudflare SG hay mất gói nên gọi API qua Cloudflare chậm. Thêm **một dòng** vào `creds.env` (hoặc biến môi trường) để gọi thẳng server gốc:
@@ -46,7 +71,7 @@ AQD_ORIGIN_IP=<IP server gốc, chủ dự án đưa>
 
 - Giống `curl --resolve`: chỉ việc tra DNS của host trong `AQD_BASE` được thay bằng IP đó. URL, SNI, header `Host` và việc kiểm tra chứng chỉ vẫn dùng tên `anuongquanhday.com`, nên chứng chỉ phải khớp tên (server gốc có sẵn chứng chỉ Let's Encrypt cho tên này). **Không bao giờ tắt kiểm tra TLS**; token / đăng nhập admin không đổi.
 - Chỉ pin đúng host của `AQD_BASE`; Google, Foody, CDN ảnh... vẫn tra DNS bình thường.
-- `AQD_BASE` phải là `https://...` và `AQD_ORIGIN_IP` phải là đúng một địa chỉ IP, không thì client admin báo lỗi ngay (`OriginPinError`) còn heartbeat tự tắt. Để trống / không có dòng này = như cũ (qua Cloudflare).
+- `AQD_BASE` phải là `https://...` và `AQD_ORIGIN_IP` phải là đúng một địa chỉ IP, không thì client admin báo lỗi ngay (`OriginPinError`). Để trống / không có dòng này = như cũ (qua Cloudflare).
 - **Bỏ:** xoá dòng đó rồi khởi động lại crawler. Chạy lại installer và chọn ghi đè `creds.env` sẽ mất dòng này (khi đó crawler lại đi qua Cloudflare, vẫn chạy được); thêm lại sau khi cài.
 - Kiểm tra trên máy: `curl -s -o /dev/null -w '%{http_code} %{time_total}\n' --resolve anuongquanhday.com:443:<IP> https://anuongquanhday.com/up` phải ra `200`.
 - Test offline: `python3 tools/test_origin_pin.py` (server TLS thật ở 127.0.0.1 với CA tạm; phần `requests` cần `pip install -r requirements.txt`).
@@ -281,7 +306,7 @@ bash tools/test_installer_mac.sh        # installer Mac: prompt/mặc định, l
 | `AQD_GOOGLE_REVIEWS_PUSH_MAX` | `= AQD_MAX_REVIEWS` | Số review gửi lên `PUT google_reviews`. Server cũ còn giới hạn 20 (`validate.rb`): gặp 422 thì gửi lại 20 review mới nhất và nhớ giới hạn 20 cho tới hết tiến trình — không hỏng gì trước khi deploy web. |
 | `AQD_PHOTO_RETRY_BACKOFF_MIN` | `15` | #1084: quán **có ảnh được chọn nhưng server nhận 0 ảnh** không còn là OK/SAFE_DONE mà là `ERROR PHOTOS_UNSENT`, vẫn draft, ghi `photo_retry.json`; thử lại sau 15, 30, 60… phút (tối đa 6 giờ). |
 | `AQD_PHOTO_RETRY_MAX` | `3` | Sau 3 lần thử lại vẫn 0 ảnh → lần cuối hoàn tất quán không ảnh (`WARN photos_unsent_gave_up`, entry `gave_up`). `alt.py` gọi `safe_run.py push --photo-retry` khi có quán đến hạn. |
-| `AQD_MIN_FREE_GB` | `5` | #1085: ổ dữ liệu còn trống < 5 GB → không cào/đẩy; `alt.py` ghi log + heartbeat `disk_full`/`blocked` rồi nghỉ; `safe_run` chạy dưới `alt.py` thoát mã `4`. `0` = tắt. |
+| `AQD_MIN_FREE_GB` | `5` | #1085: ổ dữ liệu còn trống < 5 GB → không cào/đẩy; `alt.py` ghi log + cảnh báo Slack `disk_low` rồi nghỉ; `safe_run` chạy dưới `alt.py` thoát mã `4`. `0` = tắt. |
 | `AQD_DISK_PAUSE_MIN` | `10` | Thời gian nghỉ mỗi lần ổ đầy trước khi kiểm tra lại. |
 | `AQD_ALLOW_THIN` | `0` | #1087: **dữ liệu Maps "thin" không bao giờ được validate.** `run` (chế độ CDP) kiểm tra Chrome đã đăng nhập Google (chỉ xem *tên* cookie `SID`/`__Secure-1PSID`/`__Secure-3PSID`, không đọc giá trị); chưa đăng nhập → `REFUSE TO RUN`, mã thoát `5`, `alt.py` chờ 30 phút. Quán trả về thin → không gửi gì, không `info.json`/`SAFE_PREP`, ghi `THIN` + `info.thin.json`, quán vẫn là draft chưa tên nên vòng sau cào lại; 3 quán thin liên tiếp → nghỉ Maps như trang rỗng. `push` không bao giờ validate `info.json` thin. `1` = hành vi cũ (chỉ cho test/chạy tay). |
 
