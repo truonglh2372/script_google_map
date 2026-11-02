@@ -164,20 +164,26 @@ def photo_retry_due(path, now=None):
                   and float(e.get("next_at") or 0) <= now)
 
 
-def beat(activity, **kw):
-    """Crawler heartbeat (an_uong_quanh_day#1021): at most one per AQD_HEARTBEAT_EVERY_MIN, no-op without
-    AQD_INGEST_TOKEN; best effort, never stops the loop."""
+def slack(method, *args, **kw):
+    """Slack status/alerts (an_uong_quanh_day#1388): no webhook -> no-op; best effort, never stops the loop.
+    safe_run.py passes add their counts/alerts to the same <root>/slack_state.json."""
+    global SLACK
     try:
-        if R not in sys.path: sys.path.insert(0, R)
-        import heartbeat
-        heartbeat.Heartbeat("script_google_map", R).beat(activity, **kw)
+        if SLACK is None:
+            if R not in sys.path: sys.path.insert(0, R)
+            import slack_notify
+            SLACK = slack_notify.Notifier("gmaps", R, version=slack_notify.git_version(R))
+        return getattr(SLACK, method)(*args, **kw)
     except Exception:
-        pass
+        return None
+
+
+SLACK = None
 
 
 def nap(sec):
     end = time.time() + sec
-    while time.time() < end and not stopall(): beat(f"chờ {int(sec // 60)} phút", status="idle"); time.sleep(10)
+    while time.time() < end and not stopall(): time.sleep(10)
 
 
 def run(args):
@@ -199,16 +205,20 @@ else:
 MAX_PAGES = list_max_pages(os.environ.get("AQD_LIST_MAX_PAGES"))
 FETCH_LIMIT = fetch_limit(os.environ.get("AQD_FETCH_LIMIT"))
 say(f"config: queue={os.path.basename(MINE)} list_max_pages={MAX_PAGES or 'all'} fetch_limit={FETCH_LIMIT or 'none'}")
+slack("start", "alt.py " + LABEL, extra=f"list_max_pages={MAX_PAGES or 'all'} fetch_limit={FETCH_LIMIT or 'none'}")
+slack("install_crash_hook"); slack("start_timer")
+
+
 def pause_blocked(sec, activity):
     end = time.time() + sec
-    while time.time() < end and not stopall(): beat(activity, status="blocked"); time.sleep(10)
+    while time.time() < end and not stopall(): time.sleep(10)
 
 
 while not stopall():
     _free = disk_free_gb()
     if disk_low(_free):
         say(f"DISK LOW {_free:.1f} GB free < {MIN_FREE_GB:g} GB; pause {DISK_PAUSE_MIN:g} min (no fetch/push)")
-        beat(f"tạm ngừng: ổ đĩa còn {_free:.1f} GB", status="blocked", force=True)
+        slack("error", "disk_low", f"Ổ dữ liệu còn {_free:.1f} GB (< {MIN_FREE_GB:g} GB) → tạm ngừng {DISK_PAUSE_MIN:g} phút")
         pause_blocked(DISK_PAUSE_MIN * 60, f"ổ đĩa còn {_free:.1f} GB"); continue
     _due = photo_retry_due(R + "/photo_retry.json")
     if _due:
@@ -262,7 +272,7 @@ while not stopall():
             say(f"no unnamed {LABEL} drafts left in pages {first}..{last or 'end'}; sleep {IDLE//60} min"); nap(IDLE)
         continue
     say(f"FETCH {len(queue)} {LABEL} drafts #{queue[0]['id']}..#{queue[-1]['id']}")
-    beat(f"FETCH {len(queue)} {LABEL} drafts #{queue[0]['id']}..#{queue[-1]['id']}")
+    slack("position", f"gmaps {LABEL}, list {span}, đang cào #{queue[0]['id']}..#{queue[-1]['id']} ({len(queue)} quán)")
     rc = run(["run", "--ignore-peak", "--sleep", "0", "--floor", "0", "--queue", MINE, "--limit", str(FETCH_LIMIT)])
     if stopall(): break
     if rc == 3: say("Google limited -> backoff (kept)")
@@ -273,4 +283,4 @@ while not stopall():
     elif rc != 0: say(f"fetcher rc={rc}; retry in 60s"); nap(60)
     else: say("pass done; re-list")
 say("fetcher loop stopped (STOP_ALL)")
-beat("dừng (STOP_ALL)", status="idle", force=True)
+slack("stop", "thấy file STOP_ALL")
