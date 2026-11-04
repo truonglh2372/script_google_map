@@ -20,7 +20,7 @@ Config (never committed, never logged):
   AQD_SLACK=0                 turn everything off.
 A failed send (network, timeout, HTTP error) is logged without the URL and swallowed: it never stops the crawler.
 """
-import json, os, re, shutil, socket, subprocess, sys, threading, time, traceback, urllib.request
+import json, os, re, shutil, socket, subprocess, sys, threading, time, traceback, urllib.error, urllib.request
 from datetime import datetime, timedelta, timezone
 
 ICT = timezone(timedelta(hours=7))
@@ -151,18 +151,27 @@ def _clean(text, limit=300):
     return text[:limit]
 
 
+# Result of the last post_json: "ok", "http <code>" or the exception class name. Never the URL or the payload.
+LAST_RESULT = ""
+
+
 def post_json(url, payload, timeout=10):
-    """POST the payload; True on 2xx. Never raises."""
+    """POST the payload; True on 2xx. Never raises. Sets LAST_RESULT."""
+    global LAST_RESULT
     try:
         req = urllib.request.Request(url, data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
                                      headers={"Content-Type": "application/json"}, method="POST")
         with urllib.request.urlopen(req, timeout=timeout) as r:
             code = getattr(r, "status", None) or r.getcode()
         if 200 <= int(code) < 300:
+            LAST_RESULT = "ok"
             return True
-        log(f"gửi Slack lỗi: http {code}")
+        LAST_RESULT = f"http {code}"
+    except urllib.error.HTTPError as e:
+        LAST_RESULT = f"http {e.code}"
     except Exception as e:  # noqa: BLE001 - Slack must never break the crawler
-        log(f"gửi Slack lỗi: {type(e).__name__}")
+        LAST_RESULT = type(e).__name__
+    log(f"gửi Slack lỗi: {LAST_RESULT}")
     return False
 
 
@@ -217,6 +226,7 @@ class Notifier:
         self.url = webhook_url(self.env)
         self.enabled = (self.env.get("AQD_SLACK", "1").strip() != "0") and bool(self.url)
         self.sender = sender or post_json
+        self.last_result = None
         self.disk_dir = disk_dir or state_dir
         self.every = _float_env(self.env, "AQD_REPORT_EVERY_H", 4) * 3600
         self.alert_every = _float_env(self.env, "AQD_ALERT_EVERY_H", 4) * 3600
@@ -265,12 +275,19 @@ class Notifier:
         return f"*{self.crawler} @ {self.host}*"
 
     def _send(self, kind, text):
+        global LAST_RESULT
         self.sent.append((kind, text))
         if not self.enabled:
+            self.last_result = "tắt (AQD_SLACK=0)" if self.url else "chưa cấu hình webhook"
             return False
+        LAST_RESULT = ""
         try:
-            return bool(self.sender(self.url, {"text": text, "unfurl_links": False, "unfurl_media": False}))
+            ok = bool(self.sender(self.url, {"text": text, "unfurl_links": False, "unfurl_media": False}))
+            # last_result: "ok" / "http <code>" / exception name - safe to log (never the URL).
+            self.last_result = "ok" if ok else (LAST_RESULT or "lỗi")
+            return ok
         except Exception as e:  # noqa: BLE001
+            self.last_result = type(e).__name__
             log(f"gửi Slack lỗi: {type(e).__name__}")
             return False
 

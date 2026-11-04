@@ -216,5 +216,47 @@ class ConsoleEncodingTest(unittest.TestCase):
             self.assertIn(b"[dry-run]", p.stdout)
 
 
+class SlackResultLoggedTest(unittest.TestCase):
+    """Mỗi lần gửi Slack từ job dọn ổ: ghi 'slack: ok' / 'slack: http <code>' vào log, không bao giờ ghi URL webhook."""
+    def _serve(self, code):
+        import http.server, threading
+        class H(http.server.BaseHTTPRequestHandler):
+            def do_POST(self):
+                self.rfile.read(int(self.headers.get("Content-Length") or 0))
+                self.send_response(code); self.end_headers(); self.wfile.write(b"ok" if code == 200 else b"invalid_token")
+            def log_message(self, *a):
+                pass
+        srv = http.server.HTTPServer(("127.0.0.1", 0), H)
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        self.addCleanup(srv.server_close); self.addCleanup(srv.shutdown)
+        return f"http://127.0.0.1:{srv.server_address[1]}/services/T0/B0/SECRETTOKEN42"
+
+    def _run(self, code):
+        url = self._serve(code)
+        with tempfile.TemporaryDirectory() as r:
+            w(f"{r}/old.log", age=30 * DAY)
+            env = {"SLACK_CRAWLER_WEBHOOK_URL": url, "AQD_HOST_LABEL": "test", "AQD_SLACK": "1"}
+            n = sn.Notifier("gmaps", r, env=env)
+            lines = []
+            dc.run("gmaps", r, force=True, notifier=n, env={}, say=lines.append)
+        text = "\n".join(lines)
+        self.assertNotIn("SECRETTOKEN42", text); self.assertNotIn("127.0.0.1", text); self.assertNotIn("/services/", text)
+        return lines
+
+    def test_ok_is_logged(self):
+        self.assertIn("slack: ok", self._run(200))
+
+    def test_http_error_code_is_logged(self):
+        self.assertIn("slack: http 403", self._run(403))
+
+    def test_not_configured_is_logged(self):
+        with tempfile.TemporaryDirectory() as r:
+            w(f"{r}/old.log", age=30 * DAY)
+            n = sn.Notifier("gmaps", r, env={"SLACK_CRAWLER_WEBHOOK_URL": "", "SLACK_CRAWLER_WEBHOOK_FILE": os.path.join(r, "none")})
+            lines = []
+            dc.run("gmaps", r, force=True, notifier=n, env={}, say=lines.append)
+        self.assertIn("slack: chưa cấu hình webhook", lines)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=1)

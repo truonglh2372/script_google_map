@@ -277,9 +277,11 @@ def run(crawler, root, dry_run=False, force=False, now=None, notifier=None, env=
             if notifier is None:
                 import slack_notify
                 notifier = slack_notify.Notifier(crawler, sd)
-            notifier.cleanup(freed, files, after, trigger)
+            ok = notifier.cleanup(freed, files, after, trigger)
+            res = getattr(notifier, "last_result", None) or ("ok" if ok else "lỗi")
+            say(f"slack: {res}")  # ok / http <code> / lỗi; never the webhook URL
         except Exception as e:  # noqa: BLE001 - Slack never breaks the cleanup
-            say(f"slack lỗi: {type(e).__name__}")
+            say(f"slack: lỗi {type(e).__name__}")
     return {"ran": True, "freed": freed, "files": files, "trigger": trigger, "plan": plan}
 
 
