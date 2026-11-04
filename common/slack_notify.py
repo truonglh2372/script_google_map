@@ -151,26 +151,49 @@ def _clean(text, limit=300):
     return text[:limit]
 
 
-# Result of the last post_json: "ok", "http <code>" or the exception class name. Never the URL or the payload.
+# Result of the last post_json: "ok", "http <code>", "URLError(<reason>)" or the exception class name.
+# Never the URL or the payload.
 LAST_RESULT = ""
+URLERROR_RETRY_WAIT = 5.0  # one retry after a connect-level failure (DNS / refused / connect timeout)
 
 
-def post_json(url, payload, timeout=10):
-    """POST the payload; True on 2xx. Never raises. Sets LAST_RESULT."""
+def _reason(e):
+    """Short, URL-free description of a URLError: reason class + errno/message, e.g. URLError(gaierror 11001)."""
+    r = getattr(e, "reason", None)
+    if r is None:
+        return type(e).__name__
+    errno = getattr(r, "errno", None)
+    detail = str(errno) if errno is not None else (_clean(str(r), 80) if isinstance(r, str) else "")
+    return f"{type(e).__name__}({type(r).__name__}{' ' + detail if detail else ''})"
+
+
+def post_json(url, payload, timeout=10, sleep=time.sleep):
+    """POST the payload; True on 2xx. Never raises. Sets LAST_RESULT.
+
+    A URLError means the request never got an HTTP answer (DNS, refused, connect timeout, TLS), so it is retried
+    once after URLERROR_RETRY_WAIT seconds; HTTP errors and read timeouts are not retried (no duplicate posts)."""
     global LAST_RESULT
-    try:
-        req = urllib.request.Request(url, data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
-                                     headers={"Content-Type": "application/json"}, method="POST")
-        with urllib.request.urlopen(req, timeout=timeout) as r:
-            code = getattr(r, "status", None) or r.getcode()
-        if 200 <= int(code) < 300:
-            LAST_RESULT = "ok"
-            return True
-        LAST_RESULT = f"http {code}"
-    except urllib.error.HTTPError as e:
-        LAST_RESULT = f"http {e.code}"
-    except Exception as e:  # noqa: BLE001 - Slack must never break the crawler
-        LAST_RESULT = type(e).__name__
+    for attempt in (1, 2):
+        try:
+            req = urllib.request.Request(url, data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+                                         headers={"Content-Type": "application/json"}, method="POST")
+            with urllib.request.urlopen(req, timeout=timeout) as r:
+                code = getattr(r, "status", None) or r.getcode()
+            if 200 <= int(code) < 300:
+                LAST_RESULT = "ok" if attempt == 1 else "ok (lần 2)"
+                return True
+            LAST_RESULT = f"http {code}"
+        except urllib.error.HTTPError as e:
+            LAST_RESULT = f"http {e.code}"
+        except urllib.error.URLError as e:
+            LAST_RESULT = _reason(e)
+            if attempt == 1:
+                log(f"gửi Slack lỗi: {LAST_RESULT} -> thử lại sau {URLERROR_RETRY_WAIT:g}s")
+                sleep(URLERROR_RETRY_WAIT)
+                continue
+        except Exception as e:  # noqa: BLE001 - Slack must never break the crawler
+            LAST_RESULT = type(e).__name__
+        break
     log(f"gửi Slack lỗi: {LAST_RESULT}")
     return False
 
