@@ -3,7 +3,7 @@
 Chạy bởi launchd (aqd.cleanup.<crawler>) / Task Scheduler (aqd_cleanup_<crawler>) mỗi 15 phút; mỗi lần chạy tự quyết:
   - tới hạn định kỳ: AQD_CLEANUP_EVERY_H (mặc định 6) giờ kể từ lần dọn trước, HOẶC
   - ổ còn < AQD_CLEANUP_MIN_FREE_GB (mặc định 8 GB, cao hơn ngưỡng tạm dừng của crawler: gmaps 5, foody 3) thì dọn
-    ngay (tối đa 1 lần / 30 phút), giữ cache ít ngày hơn.
+    ngay (tối đa 1 lần / 30 phút), log chỉ giữ 3 ngày; cache menu vẫn giữ đủ AQD_CLEANUP_CACHE_DAYS (7).
 Crawler không có giờ nghỉ cố định, nên job KHÔNG dừng crawler: nó chỉ xoá file crawler không còn dùng tới (đã đẩy
 xong / cache cũ / log cũ). Khi ổ dưới ngưỡng, chính crawler đã tự tạm dừng (alt.py AQD_MIN_FREE_GB, foody
 --min-free-gb) và tự chạy lại khi job này giải phóng xong. Không đụng file STOP/STOP_ALL.
@@ -259,7 +259,7 @@ def run(crawler, root, dry_run=False, force=False, now=None, notifier=None, env=
     if not go:
         return {"ran": False}
     if low:
-        o["cache_days"] = min(o["cache_days"], 1); o["log_days"] = min(o["log_days"], 3)
+        o["log_days"] = min(o["log_days"], 3)  # cache menu giữ nguyên AQD_CLEANUP_CACHE_DAYS (7), không hạ khi ổ thấp
     with Lock(os.path.join(sd, "cleanup.lock")) as lk:
         if not lk.ok:
             say("đang có lượt dọn khác -> bỏ qua"); return {"ran": False}
