@@ -103,6 +103,9 @@ if (Test-Path "$Aqd\alt.py") {
 # 3. watchdogs (repo scripts)
 if ((Test-Path "$Foody\windows\install_watchdog.ps1") -and (Test-Path "$Startup\aqd_foody.cmd")) { $env:AQD_FOODY_ROOT = $Foody; & powershell -NoProfile -ExecutionPolicy Bypass -File "$Foody\windows\install_watchdog.ps1" }
 if ((Test-Path "$Aqd\watchdog.py") -and (Test-Path "$Startup\aqd_fetcher.cmd")) { $env:AQD_ROOT = $Aqd; & powershell -NoProfile -ExecutionPolicy Bypass -File "$G\windows\install_watchdog.ps1" }
+# 3b. auto disk cleanup (Task Scheduler, checks every 15 min; cleans every AQD_CLEANUP_EVERY_H h or when disk is low)
+if ((Test-Path "$Foody\windows\install_cleanup.ps1") -and (Test-Path "$Foody\common\disk_cleanup.py") -and (Test-Path "$Startup\aqd_foody.cmd")) { $env:AQD_FOODY_ROOT = $Foody; & powershell -NoProfile -ExecutionPolicy Bypass -File "$Foody\windows\install_cleanup.ps1" }
+if ((Test-Path "$Aqd\disk_cleanup.py") -and (Test-Path "$Startup\aqd_fetcher.cmd")) { $env:AQD_ROOT = $Aqd; & powershell -NoProfile -ExecutionPolicy Bypass -File "$G\windows\install_cleanup.ps1" }
 
 # 4. restart
 if ($env:AQD_RESTART -ne '0') {

@@ -97,6 +97,11 @@ fi
 if [ -f "$AQD/watchdog.py" ] && [ -f "$HOME/Library/LaunchAgents/aqd.alt.plist" ]; then
   if [ -f "$SRC/mac/install_watchdog.sh" ]; then AQD_ROOT="$AQD" sh "$SRC/mac/install_watchdog.sh"; fi
 fi
+# 3b. auto disk cleanup (launchd, checks every 15 min; cleans every AQD_CLEANUP_EVERY_H h or when disk is low)
+[ -f "$FOODY/mac/install_cleanup.sh" ] && [ -f "$FOODY/common/disk_cleanup.py" ] && [ -f "$HOME/Library/LaunchAgents/aqd.foody.plist" ] && AQD_FOODY_ROOT="$FOODY" sh "$FOODY/mac/install_cleanup.sh"
+if [ -f "$AQD/disk_cleanup.py" ] && [ -f "$HOME/Library/LaunchAgents/aqd.alt.plist" ] && [ -f "$SRC/mac/install_cleanup.sh" ]; then
+  AQD_ROOT="$AQD" sh "$SRC/mac/install_cleanup.sh"
+fi
 
 # 4. restart
 if [ "$RESTART" = 1 ]; then
