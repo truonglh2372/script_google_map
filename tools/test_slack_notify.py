@@ -4,6 +4,7 @@ Network only to a fake Slack server on 127.0.0.1; never a real webhook.
 Run: python3 <tests dir>/test_slack_notify.py
 """
 import http.server, json, os, sys, tempfile, threading, time, unittest
+from unittest import mock
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(os.path.dirname(HERE), "common"))
@@ -353,6 +354,50 @@ class Watch(Base):
     def test_list_processes_sees_this_process(self):
         self.assertTrue(any(pid == os.getpid() for pid, _ in wd.list_processes()))
 
+
+
+class UrlErrorReason(unittest.TestCase):
+    """Admin 04/11 15:35: cleanup logged a bare 'slack: URLError' with no reason; show it and retry once."""
+
+    def _urlopen(self, outcomes):
+        calls = []
+
+        def fake(req, timeout=None):
+            calls.append(req)
+            o = outcomes.pop(0)
+            if isinstance(o, BaseException):
+                raise o
+            resp = mock.MagicMock(status=o)
+            resp.__enter__.return_value = resp
+            return resp
+        return fake, calls
+
+    def test_reason_logged_without_url(self):
+        import socket, urllib.error
+        url = "https://hooks.slack.com/services/T000/B000/SECRETxyz"
+        err = urllib.error.URLError(socket.gaierror(11001, "getaddrinfo failed"))
+        fake, calls = self._urlopen([err, urllib.error.URLError(socket.gaierror(11001, "getaddrinfo failed"))])
+        with mock.patch.object(sn.urllib.request, "urlopen", fake), mock.patch.object(sn, "log") as lg:
+            self.assertFalse(sn.post_json(url, {"text": "x"}, sleep=lambda s: None))
+        self.assertEqual(sn.LAST_RESULT, "URLError(gaierror 11001)")
+        self.assertEqual(len(calls), 2)
+        self.assertNotIn("SECRET", " ".join(str(c) for c in lg.call_args_list))
+
+    def test_retry_once_then_ok(self):
+        import urllib.error
+        fake, calls = self._urlopen([urllib.error.URLError(TimeoutError("timed out")), 200])
+        waits = []
+        with mock.patch.object(sn.urllib.request, "urlopen", fake), mock.patch.object(sn, "log"):
+            self.assertTrue(sn.post_json("https://example.invalid/x", {"text": "x"}, sleep=waits.append))
+        self.assertEqual(sn.LAST_RESULT, "ok (lần 2)")
+        self.assertEqual(waits, [sn.URLERROR_RETRY_WAIT])
+
+    def test_http_error_not_retried(self):
+        import urllib.error
+        fake, calls = self._urlopen([urllib.error.HTTPError("u", 403, "no", {}, None)])
+        with mock.patch.object(sn.urllib.request, "urlopen", fake), mock.patch.object(sn, "log"):
+            self.assertFalse(sn.post_json("https://example.invalid/x", {"text": "x"}, sleep=lambda s: None))
+        self.assertEqual((sn.LAST_RESULT, len(calls)), ("http 403", 1))
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
