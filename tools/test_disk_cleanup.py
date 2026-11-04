@@ -90,6 +90,21 @@ class GmapsTest(unittest.TestCase):
         freed, files = n.calls[0][0], n.calls[0][1]
         self.assertEqual(files, 7); self.assertGreater(freed, 1400000)
 
+    def test_low_disk_keeps_menu_cache_7_days_but_drops_logs_to_3(self):
+        menu2 = w(f"{self.r}/menu_ocr_cache/cc.jpg", age=2 * DAY)
+        menu6 = w(f"{self.r}/menu_ocr_cache/dd.jpg", age=6 * DAY)
+        log4 = w(f"{self.r}/old4.log", age=4 * DAY)
+        real = dc.free_gb
+        dc.free_gb = lambda p: 1.0
+        try:
+            res, _ = self.run_it()
+        finally:
+            dc.free_gb = real
+        self.assertTrue(res["ran"])
+        self.assertTrue(os.path.exists(menu2)); self.assertTrue(os.path.exists(menu6))
+        self.assertFalse(os.path.exists(self.f["menu_old"]))  # > 7 ngày vẫn xoá
+        self.assertEqual(os.path.getsize(log4), 0)
+
     def test_symlink_out_of_root_is_never_followed(self):
         with tempfile.TemporaryDirectory() as out:
             victim = w(f"{out}/keep.jpg")

@@ -64,7 +64,7 @@ Test offline (chỉ server Slack giả ở 127.0.0.1): `python3 tools/test_slack
 
 ### Tự dọn ổ (sau cảnh báo disk_low 04/11/2026)
 Crawler không có giờ nghỉ cố định, nên job dọn chạy theo lịch: launchd `aqd.cleanup.gmaps` / Task Scheduler `aqd_cleanup_gmaps` gọi `common/disk_cleanup.py` mỗi 15 phút, script tự quyết:
-- dọn định kỳ mỗi `AQD_CLEANUP_EVERY_H` giờ (mặc định 6), **hoặc** ngay khi ổ còn < `AQD_CLEANUP_MIN_FREE_GB` (mặc định 8 GB, cao hơn ngưỡng tự tạm dừng của crawler) — tối đa 1 lần/30 phút, giữ cache ít ngày hơn.
+- dọn định kỳ mỗi `AQD_CLEANUP_EVERY_H` giờ (mặc định 6), **hoặc** ngay khi ổ còn < `AQD_CLEANUP_MIN_FREE_GB` (mặc định 8 GB, cao hơn ngưỡng tự tạm dừng của crawler) — tối đa 1 lần/30 phút; khi ổ thấp log chỉ giữ 3 ngày, còn cache ảnh menu vẫn giữ đủ `AQD_CLEANUP_CACHE_DAYS` (7) ngày.
 - Không dừng crawler và không đụng file STOP/STOP_ALL: chỉ xoá file crawler không còn dùng tới. Khi ổ dưới ngưỡng, crawler đã tự tạm dừng sẵn và tự chạy lại khi có chỗ.
 - Chỉ xoá thứ tạo lại được: ảnh trong `aqd_data/<id>/` đã có `SAFE_DONE` hơn 1 giờ và id không nằm trong `photo_retry.json`; `menu_ocr_cache/*.jpg` cũ hơn `AQD_CLEANUP_CACHE_DAYS` (7) ngày (giữ `.ocr.json`; menu worker tự tải lại ảnh khi thiếu); log `.log/.out/.err` không ghi thêm trong `AQD_CLEANUP_LOG_DAYS` (14) ngày → cắt về rỗng (log xoay `*.log.N` → xoá); log đang ghi > `AQD_CLEANUP_LOG_MAX_MB` (50) → giữ `AQD_CLEANUP_LOG_KEEP_MB` (5) MB cuối; `*.tmp/*.part` > 1 ngày.
 - **Không bao giờ** xoá: json/jsonl dữ liệu, dữ liệu chưa đồng bộ, `crawler.env`, `creds.env`, `*.env`, file secret, `chrome-profile`/profile đăng nhập, venv, `.git`, `bak/`; không theo symlink ra ngoài root.
