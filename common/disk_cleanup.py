@@ -291,6 +291,12 @@ def main(argv=None):
     ap.add_argument("--force", action="store_true", help="dọn ngay, bỏ qua lịch")
     ap.add_argument("--log", help="ghi log vào file này")
     a = ap.parse_args(argv)
+    # Windows console (cp1252/cp437) không in được tiếng Việt -> --dry-run trên Admin chết UnicodeEncodeError.
+    for st in (sys.stdout, sys.stderr):
+        try:
+            st.reconfigure(encoding="utf-8", errors="replace")
+        except (AttributeError, ValueError, OSError):
+            pass
     out = open(a.log, "a", encoding="utf-8") if a.log else None
     def say(s):
         line = f"{time.strftime('%F %T')} {s}"

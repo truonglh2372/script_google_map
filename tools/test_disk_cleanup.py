@@ -188,5 +188,18 @@ class MacInstallerTest(unittest.TestCase):
             self.assertEqual(r.returncode, 0); self.assertFalse(os.path.exists(os.path.join(home, "Library", "LaunchAgents", f"aqd.cleanup.{crawler}.plist")))
 
 
+class ConsoleEncodingTest(unittest.TestCase):
+    """Admin (Windows): console cp1252 -> --dry-run không được chết vì chữ tiếng Việt."""
+    def test_dry_run_on_cp1252_console(self):
+        import subprocess
+        with tempfile.TemporaryDirectory() as r:
+            w(f"{r}/old.log", age=30 * DAY)
+            env = dict(os.environ, PYTHONIOENCODING="cp1252")
+            p = subprocess.run([sys.executable, dc.__file__, "--crawler", "gmaps", "--root", r, "--dry-run"],
+                               env=env, capture_output=True)
+            self.assertEqual(p.returncode, 0, p.stderr.decode("utf-8", "replace"))
+            self.assertIn(b"[dry-run]", p.stdout)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=1)
