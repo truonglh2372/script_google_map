@@ -396,6 +396,14 @@ class Notifier:
         detail = f"`{type(exc).__name__}: {_clean(exc, 160)}`{where}" if exc else "không rõ"
         return self.error("crash", detail)
 
+    def cleanup(self, freed_bytes, files, free_gb=None, trigger="định kỳ"):
+        """Một dòng sau mỗi lượt tự dọn ổ (common/disk_cleanup.py). Không chống spam: job tự giới hạn tần suất."""
+        free = self.disk_free_gb() if free_gb is None else free_gb
+        text = (f"🧹 {self._title()} — tự dọn ổ ({trigger}): giải phóng {gb(max(0, freed_bytes) / 1024 ** 3)}"
+                f" ({num(files)} file)" + (f" · còn trống {gb(free)}" if free is not None else "")
+                + f" · {ddmm_hhmm(self.now())} (UTC+7)")
+        return self._send("cleanup", text)
+
     # ---- lifecycle (long-running process) ------------------------------------------------------------------------
     def start(self, command="", extra=None):
         def fn(st):
