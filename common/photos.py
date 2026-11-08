@@ -38,9 +38,8 @@ def log(s):
     open(LOG, "a", encoding="utf-8").write(line + "\n"); print(line, flush=True)
 
 
-JS_URLS = """()=>{const s=new Set();document.querySelectorAll('[style*="googleusercontent"],img[src*="googleusercontent"]').forEach(e=>{
- const m=(e.getAttribute('style')||'').match(/url\\(["']?(https:[^"')]+)/);const u=m?m[1]:e.src;
- if(u&&/\\/(gps-cs-s|p)\\//.test(u))s.add(u.split('=')[0])});return [...s]}"""
+# The old page-wide JS_URLS/scroll_collect (Oct 9-10 runs) also picked up the 'Mọi người cũng tìm kiếm' /
+# People-also-search-for thumbnails of other places. Removed: only gallery() + _scoped_urls() collect photos now.
 
 
 def nap(sec):
@@ -63,17 +62,6 @@ def blocked(pg):
 
 def signed_in(pg):
     return pg.locator('a[href*="ServiceLogin"]').count() == 0 and "chế độ bị hạn chế" not in pg.inner_text("body")[:20000]
-
-
-def scroll_collect(pg, rounds=60):
-    got = set(pg.evaluate(JS_URLS)); still = 0
-    for _ in range(rounds):
-        pg.mouse.move(220, 500); pg.mouse.wheel(0, 800); pg.wait_for_timeout(1300 + random.randint(0, 900))
-        n = set(pg.evaluate(JS_URLS))
-        still = still + 1 if n <= got else 0
-        got |= n
-        if still >= 4: break
-    return got
 
 
 LAST_LINKS = {}
