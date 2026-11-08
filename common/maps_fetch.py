@@ -77,6 +77,25 @@ def _base(url):
     return url.split("=")[0] if "googleusercontent.com" in url else url
 
 
+_HEX = re.compile(r"^0x[0-9a-f]+:0x[0-9a-f]+$", re.I)
+
+
+def _own_nodes(p, me):
+    """walk(p) minus sub-trees that belong to another place (related / 'People also search for' cards carry their
+    own 0x..:0x.. id) so their thumbnails never end up in this place's album."""
+    me = (me or "").lower()
+    def go(o):
+        if not isinstance(o, list):
+            return
+        ids = [x for x in o if isinstance(x, str) and _HEX.match(x)]
+        if me and ids and ids[0].lower() != me:
+            return
+        yield o
+        for x in o:
+            yield from go(x)
+    yield from go(p)
+
+
 def photos(p):
     """Distinct photos embedded in the preview. Photo node: [..., 6:[url, label, [w,h]], ..., 21:[..19:[kind, ref]]]."""
     by_ref, order = {}, []
@@ -86,7 +105,7 @@ def photos(p):
             ref = g(ph, 21, 19, 1)
             if ref:
                 cat_of.setdefault(ref, set()).add(g(c, 2))
-    for node in walk(p):
+    for node in _own_nodes(p, g(p, 10)):
         url, kind, ref = g(node, 6, 0), g(node, 21, 19, 0), g(node, 21, 19, 1)
         if not (isinstance(url, str) and isinstance(ref, str) and isinstance(kind, str)):
             continue
