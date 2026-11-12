@@ -18,3 +18,4 @@ slack_webhook*
 slack_state.json*
 watchdog_state.json
 crawler.env
+watchdog_cdp_state.json
