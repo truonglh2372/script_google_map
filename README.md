@@ -70,6 +70,8 @@ Crawler không có giờ nghỉ cố định, nên job dọn chạy theo lịch:
 - **Không bao giờ** xoá: json/jsonl dữ liệu, dữ liệu chưa đồng bộ, `crawler.env`, `creds.env`, `*.env`, file secret, `chrome-profile`/profile đăng nhập, venv, `.git`, `bak/`; không theo symlink ra ngoài root.
 - Mỗi lần dọn thật: 1 dòng Slack `🧹 *gmaps @ <máy>* — tự dọn ổ (định kỳ): giải phóng 3,2 GB (1.234 file) · còn trống 11,5 GB`. Log: `<root>/cleanup.log`.
 - Cài: `sh mac/install_cleanup.sh` (macOS) · `windows\install_cleanup.ps1` (Windows); gỡ: `--uninstall` / `-Uninstall`. Xem trước, không xoá: `--dry-run` / `-DryRun`. Bộ cài 1 lệnh (`install_crawlers`) tự cài job này.
+- Dọn được 0 byte: không gửi dòng 🧹. Nếu ổ đang thấp → cảnh báo `disk_low` (tối đa 1 lần / `AQD_CLEANUP_ALERT_H`=6 giờ) liệt kê thứ đang chiếm chỗ (`common/host_usage.py`, đo bằng `os.scandir`, chạy được trên Windows, không cần `du`): `pagefile.sys` / `hiberfil.sys` / `swapfile.sys`, thư mục con lớn nhất của ổ chứa root (vd `C:\`), `%USERPROFILE%`, `%LOCALAPPDATA%` và root crawler (Mac/Linux: home + root), process ngốn RAM nhất (`tasklist` / `ps`). Giới hạn: `AQD_SPACE_SCAN_SECONDS`=90 s tổng, `AQD_SPACE_SCAN_MAX_ENTRIES`=2.000.000 mục mỗi thư mục (đo dở thì ghi `>=`), `AQD_SPACE_TOP`=5, `AQD_SPACE_PROCS`=5. Xem tay: `python host_usage.py C:\aqd`.
+- Cache Chrome: chỉ `chrome-profile\Default\Cache` và `chrome-profile\Default\Code Cache` (danh sách cố định), **chỉ khi Chrome crawler không chạy** (không process nào có `--user-data-dir=<root>\chrome-profile` hoặc `--remote-debugging-port=<cổng>`, cổng CDP đóng; không đọc được danh sách process → bỏ qua). Không bao giờ đụng History, Cookies, Login Data hay bất cứ thứ gì khác trong profile. `AQD_CLEANUP_CHROME_CACHE`: `low` (mặc định, chỉ khi ổ thấp) / `1` (mọi lượt) / `0` (tắt).
 - Test offline: `python3 tools/test_disk_cleanup.py` (có dry-run, vùng cấm, symlink, lịch, khoá, dòng Slack, installer launchd với `launchctl` giả).
 
 ## Gọi thẳng server gốc, bỏ qua Cloudflare (an_uong_quanh_day#1058)
@@ -299,6 +301,7 @@ python tools/test_list_paging.py        # list từng phần: ETA, cửa sổ tr
 python tools/test_audit_gaps.py         # #1083 review 50 + phân trang, #1084 ảnh gửi 0 + replay, #1085 ổ đĩa, #1087 thin
 python tools/test_no_streetview.py      # #681: không tải ảnh Street View lên, không đặt làm ảnh bìa
 python tools/test_origin_pin.py         # an_uong_quanh_day#1058: AQD_ORIGIN_IP gọi thẳng server gốc, TLS vẫn kiểm tra theo tên
+python tools/test_disk_cleanup.py       # dọn ổ: vùng cấm, lịch, Slack, cảnh báo disk_low khi dọn 0 byte (đo ổ kiểu Windows giả lập), cache Chrome
 powershell -File tools/test_installer_stream.ps1   # Nat -Stream (tiến độ pip) + tín hiệu sống + timeout
 powershell -File tools/test_installer_guards.ps1   # guard theo root, Chrome theo root, cảnh báo đuôi/parity, CLEAN dọn .py lạ, mọi prompt có mặc định
 bash tools/test_installer_mac.sh        # installer Mac: prompt/mặc định, layout phẳng, aqd_config.json, cảnh báo trùng, guard root, Chrome theo root, plist, CLEAN (mọi công cụ macOS đều được stub; cần bash)
