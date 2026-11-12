@@ -14,9 +14,16 @@ CHỈ xoá thứ tạo lại được:
   foody : ảnh còn sót trong foody_data/<fid>/photos/ của quán có trong _cleaned.json (server đã xác nhận succeeded).
   cả hai: log (.log/.out/.err) không ghi thêm trong AQD_CLEANUP_LOG_DAYS (14) ngày -> cắt về rỗng (log đã xoay *.log.N -> xoá); log đang ghi > AQD_CLEANUP_LOG_MAX_MB
           (50) -> cắt còn AQD_CLEANUP_LOG_KEEP_MB (5) cuối; *.tmp/*.part cũ hơn 1 ngày.
+  gmaps : cache trình duyệt chrome-profile/Default/{Cache, Code Cache} (danh sách CỐ ĐỊNH CHROME_CACHE_DIRS), CHỈ khi
+          Chrome crawler KHÔNG chạy (không process nào có --user-data-dir=<root>/chrome-profile hoặc
+          --remote-debugging-port=<cổng CDP>, và cổng CDP đóng; không đọc được danh sách process -> coi như đang chạy,
+          bỏ qua). AQD_CLEANUP_CHROME_CACHE: low (mặc định, chỉ khi ổ thấp) / 1 (mọi lượt) / 0 (tắt).
 KHÔNG BAO GIỜ xoá: json/jsonl dữ liệu, quán chưa SAFE_DONE / chưa _cleaned, crawler.env, creds.env, *.env, file secret,
-chrome-profile, profile đăng nhập, venv, .git, bak/.
-Mỗi lần dọn thật: một dòng Slack qua slack_notify (#1388). --dry-run: chỉ liệt kê, không xoá, không gửi Slack.
+phần còn lại của chrome-profile (History, Cookies, Login Data, Local State, ...), profile đăng nhập, venv, .git, bak/.
+Mỗi lần dọn thật CÓ giải phóng: một dòng Slack qua slack_notify (#1388). Dọn 0 file -> không gửi; nếu ổ thấp thì gửi
+cảnh báo disk_low (tối đa 1 lần / AQD_CLEANUP_ALERT_H (6) giờ) kèm thứ đang chiếm ổ: file hệ thống (pagefile.sys,
+hiberfil.sys, swapfile.sys), thư mục lớn nhất (đo bằng os.scandir, chạy được cả Windows, có giới hạn thời gian) và
+process ngốn RAM nhất - xem host_usage.py. --dry-run: chỉ liệt kê, không xoá, không gửi Slack.
 """
 import argparse, json, os, sys, time
 
@@ -34,6 +41,17 @@ NEVER_EXT = (".env", ".json", ".jsonl", ".py", ".sh", ".ps1", ".cmd", ".plist", 
 SETTLE = 3600          # SAFE_DONE phải cũ hơn 1 giờ
 LOW_GAP = 1800         # ổ thấp: tối đa 1 lần dọn / 30 phút
 TMP_AGE = 86400
+CHROME_PROFILE = "chrome-profile"
+# Allowlist: the ONLY folders inside chrome-profile that may be emptied. Everything else in the profile (History,
+# Cookies, Login Data, Local State, Preferences, IndexedDB, ...) is never touched.
+CHROME_CACHE_DIRS = (("Default", "Cache"), ("Default", "Code Cache"))
+DEFAULT_CDP_PORT = 9222
+
+
+def top_space_users(root, env=None):
+    """Văn bản ngắn: thứ đang chiếm ổ/RAM (host_usage.report). Test thay hàm này."""
+    import host_usage
+    return host_usage.report(root, env)
 
 
 def env_num(env, name, default):
@@ -47,7 +65,9 @@ def options(env=None, **over):
     env = os.environ if env is None else env
     o = {"every_h": env_num(env, "AQD_CLEANUP_EVERY_H", 6), "min_free_gb": env_num(env, "AQD_CLEANUP_MIN_FREE_GB", 8),
          "cache_days": env_num(env, "AQD_CLEANUP_CACHE_DAYS", 7), "log_days": env_num(env, "AQD_CLEANUP_LOG_DAYS", 14),
-         "log_max_mb": env_num(env, "AQD_CLEANUP_LOG_MAX_MB", 50), "log_keep_mb": env_num(env, "AQD_CLEANUP_LOG_KEEP_MB", 5)}
+         "log_max_mb": env_num(env, "AQD_CLEANUP_LOG_MAX_MB", 50), "log_keep_mb": env_num(env, "AQD_CLEANUP_LOG_KEEP_MB", 5),
+         "alert_h": env_num(env, "AQD_CLEANUP_ALERT_H", 6),
+         "chrome_cache": (env.get("AQD_CLEANUP_CHROME_CACHE") or "low").strip().lower()}
     o.update({k: v for k, v in over.items() if v is not None})
     o.setdefault("foody_data", None)
     return o
@@ -164,6 +184,87 @@ def plan_foody(root, now, o):
 PROFILES = {"gmaps": plan_gmaps, "foody": plan_foody}
 
 
+def cdp_port(root, env=None):
+    """AQD_CDP_PORT > aqd_config.json cdp_port > 9222 (same order as start_fetcher.ps1)."""
+    env = os.environ if env is None else env
+    for v in (env.get("AQD_CDP_PORT"), (_read_json(os.path.join(root, "aqd_config.json"), {}) or {}).get("cdp_port")):
+        try:
+            if v not in (None, ""):
+                return int(v)
+        except (TypeError, ValueError):
+            pass
+    return DEFAULT_CDP_PORT
+
+
+def _norm(p):
+    return str(p or "").replace("\\", "/").rstrip("/").lower()
+
+
+def port_open(port, host="127.0.0.1", timeout=1.0):
+    import socket
+    try:
+        with socket.create_connection((host, port), timeout=timeout):
+            return True
+    except OSError:
+        return False
+
+
+def chrome_state(root, port, lister=None, port_check=port_open):
+    """'running' / 'stopped' / 'unknown' for THIS root's crawler Chrome. Running = a process whose command line has
+    --user-data-dir=<root>/chrome-profile or --remote-debugging-port=<port>, or the CDP port answers.
+    'unknown' (process list unreadable) must be treated like 'running' by callers."""
+    if port_check(port):
+        return "running"
+    if lister is None:
+        import host_usage
+        lister = host_usage.list_commands
+    procs = lister()
+    if procs is None:
+        return "unknown"
+    prof = _norm(os.path.join(os.path.abspath(root), CHROME_PROFILE))
+    flag = f"--remote-debugging-port={port}"
+    for _pid, cmd in procs:
+        c = _norm(cmd)
+        if flag in c or prof in c:
+            return "running"
+    return "stopped"
+
+
+def _cache_dirs(root):
+    base = os.path.join(os.path.realpath(root), CHROME_PROFILE)
+    return [os.path.join(base, *parts) for parts in CHROME_CACHE_DIRS]
+
+
+def is_chrome_cache_file(path, root):
+    """True only for a regular file (not a symlink) whose real path is inside one of the allowlisted cache folders,
+    and the cache folder itself (and chrome-profile) is a real folder, not a link pointing elsewhere."""
+    if os.path.islink(path) or not os.path.isfile(path):
+        return False
+    real = os.path.realpath(path)
+    for d in _cache_dirs(root):
+        if os.path.islink(d) or os.path.realpath(d) != d:
+            continue
+        try:
+            if os.path.commonpath([real, d]) == d and real != d:
+                return True
+        except ValueError:  # different drives on Windows
+            continue
+    return False
+
+
+def plan_chrome_cache(root):
+    out = []
+    for d in _cache_dirs(root):
+        if not os.path.isdir(d) or os.path.islink(d) or os.path.realpath(d) != d:
+            continue
+        for a, dirs, fs in os.walk(d, followlinks=False):
+            dirs[:] = [x for x in dirs if not os.path.islink(os.path.join(a, x))]
+            for n in fs:
+                p = os.path.join(a, n)
+                out.append(("cache", p, _size(p), "cache Chrome (Chrome crawler đang tắt)"))
+    return out
+
+
 def state_dir_for(crawler, root, env=None):
     env = os.environ if env is None else env
     if crawler == "foody":
@@ -204,7 +305,7 @@ def trim(p, keep):
 def execute(plan, root, o, dry_run, say=print):
     freed = files = 0
     for act, p, size, why in plan:
-        if not is_safe(p, root):
+        if not (is_chrome_cache_file(p, root) if act == "cache" else is_safe(p, root)):
             say(f"BỎ QUA (vùng cấm) {p}"); continue
         if dry_run:
             say(f"[dry-run] {act} {p} ({size} B, {why})"); freed += max(0, size); files += 1; continue
@@ -246,7 +347,24 @@ class Lock:
             except OSError: pass
 
 
-def run(crawler, root, dry_run=False, force=False, now=None, notifier=None, env=None, say=print, **over):
+def chrome_cache_step(root, o, low, dry_run, env, say, state_fn=None):
+    """(freed, files) from emptying the allowlisted Chrome cache folders - only when allowed by
+    AQD_CLEANUP_CHROME_CACHE and the crawler Chrome is NOT running (checked right before deleting)."""
+    mode = o.get("chrome_cache", "low")
+    if mode in ("0", "off", "no") or (mode == "low" and not low):
+        return 0, 0
+    if not any(os.path.isdir(d) for d in _cache_dirs(root)):
+        return 0, 0
+    state_fn = state_fn or (lambda: chrome_state(root, cdp_port(root, env)))
+    state = state_fn()
+    if state != "stopped":
+        say(f"cache Chrome: bỏ qua (Chrome crawler {'đang chạy' if state == 'running' else 'không rõ trạng thái'})")
+        return 0, 0
+    return execute(plan_chrome_cache(root), root, o, dry_run, say)
+
+
+def run(crawler, root, dry_run=False, force=False, now=None, notifier=None, env=None, say=print,
+        chrome_state_fn=None, **over):
     now = time.time() if now is None else now
     o = options(env, **over)
     sd = state_dir_for(crawler, root, env)
@@ -265,6 +383,9 @@ def run(crawler, root, dry_run=False, force=False, now=None, notifier=None, env=
             say("đang có lượt dọn khác -> bỏ qua"); return {"ran": False}
         plan = PROFILES[crawler](root, now, o)
         freed, files = execute(plan, root, o, dry_run, say)
+        if crawler == "gmaps":
+            cf, cn = chrome_cache_step(root, o, low, dry_run, os.environ if env is None else env, say, chrome_state_fn)
+            freed += cf; files += cn
     after = free_gb(sd)
     say(f"{'[dry-run] ' if dry_run else ''}{crawler}: {trigger}; {files} file, {freed / 1024 ** 3:.2f} GB"
         + (f"; còn trống {after:.1f} GB" if after is not None else ""))
@@ -273,11 +394,24 @@ def run(crawler, root, dry_run=False, force=False, now=None, notifier=None, env=
         tmp = stp + ".tmp"
         with open(tmp, "w", encoding="utf-8") as f: json.dump(st, f)
         os.replace(tmp, stp)
+        nothing = freed <= 0  # 0 byte giải phóng (vd chỉ cắt log đã rỗng) = không có gì để báo
+        send_alert = nothing and low and now - float(st.get("last_alert") or 0) >= o["alert_h"] * 3600
+        if nothing and not send_alert:
+            say("slack: bỏ qua (không giải phóng gì)")
+            return {"ran": True, "freed": freed, "files": files, "trigger": trigger, "plan": plan}
         try:
             if notifier is None:
                 import slack_notify
                 notifier = slack_notify.Notifier(crawler, sd)
-            ok = notifier.cleanup(freed, files, after, trigger)
+            if send_alert:
+                st["last_alert"] = now
+                with open(tmp, "w", encoding="utf-8") as f: json.dump(st, f)
+                os.replace(tmp, stp)
+                top = top_space_users(root, os.environ if env is None else env)
+                say(f"ổ thấp, không còn gì để dọn; chỗ đang chiếm: {top}")
+                ok = notifier.disk_low_nothing(after, top)
+            else:
+                ok = notifier.cleanup(freed, files, after, trigger)
             res = getattr(notifier, "last_result", None) or ("ok" if ok else "lỗi")
             say(f"slack: {res}")  # ok / http <code> / lỗi; never the webhook URL
         except Exception as e:  # noqa: BLE001 - Slack never breaks the cleanup

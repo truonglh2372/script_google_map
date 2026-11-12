@@ -2,6 +2,8 @@
 # then alt.py. Root-scoped: the single-instance mutex, the STOP_ALL check and the python process scan only
 # look at this root; a Chrome already on the CDP port is reused only when its --user-data-dir is THIS root's
 # profile, otherwise a free port is used (a new root never writes into an old root's profile).
+# AQD_CHROME_ONLY=1 (set by watchdog.py when a full CDP connect hangs and it closed this root's Chrome): only (re)open
+# the Chrome part below - same chrome.exe, profile, port and args - and never start or check alt.py.
 # ASCII only on purpose (the installer prepends an env line; Windows PowerShell 5.1 reads a .ps1 without a BOM as ANSI).
 $root = if ($env:AQD_ROOT) { $env:AQD_ROOT } else { 'C:\aqd' }
 $py = 'C:\Users\Admin\AppData\Local\Programs\Python\Python312\python.exe'
@@ -26,7 +28,8 @@ $mtx = New-Object System.Threading.Mutex($false, "Global\aqd_fetcher_launcher_$t
 if(-not $mtx.WaitOne(0)){ L "another launcher for $root is running; exit"; exit }
 try {
   if(Test-Path (Join-Path $root 'STOP_ALL')){ L "STOP_ALL present in $root; not starting"; exit }
-  if(AqdProcsHere){ L "alt/safe_run for $root already running; nothing to do"; exit }
+  $chromeOnly = ($env:AQD_CHROME_ONLY -eq '1')
+  if(-not $chromeOnly -and (AqdProcsHere)){ L "alt/safe_run for $root already running; nothing to do"; exit }
   $other = @(AqdProcsElsewhere)
   if($other.Count -gt 0){ L ("$($other.Count) aqd process(es) belong to ANOTHER root - not touching them: " + (($other | %{ $_.ProcessId }) -join ',')) }
   $port = 9222
@@ -49,6 +52,7 @@ try {
     if(-not (CdpUp $chosen)){ L "Chrome CDP $chosen not up after 60s; abort"; exit }
     Start-Sleep 10
   }
+  if($chromeOnly){ L "chrome-only (watchdog): Chrome CDP $chosen ready; alt.py not touched"; exit }
   if(AqdProcsHere){ L 'alt appeared meanwhile; exit'; exit }
   $env:AQD_CDP_PORT = "$chosen"
   Start-Process -WindowStyle Hidden -FilePath $py -ArgumentList (Join-Path $root 'alt.py') -WorkingDirectory $root
